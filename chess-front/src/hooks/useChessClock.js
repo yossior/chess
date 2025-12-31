@@ -31,6 +31,9 @@ export function useChessClock({
   // last timestamp when we subtracted time
   const lastTsRef = useRef(null);
 
+  // track if tab is visible to pause/resume clocks
+  const isPageVisibleRef = useRef(true);
+
   // a small state toggler to force re-render for live UI
   const [, setTick] = useState(0);
 
@@ -73,11 +76,37 @@ export function useChessClock({
     }
     setTick((t) => t + 1);
   }, [incrementMs]);
+
+  // Handle page visibility to pause/resume clocks in background tabs
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        // Tab is hidden - reset the timestamp so clock doesn't skip when returning
+        isPageVisibleRef.current = false;
+        lastTsRef.current = null;
+      } else {
+        // Tab is visible again - reset timestamp for accurate tick
+        isPageVisibleRef.current = true;
+        lastTsRef.current = performance.now();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
+
   // internal interval: subtract elapsed ms from active side
   useEffect(() => {
     let intId = null;
 
     function tick() {
+      // Skip ticking if page is not visible
+      if (!isPageVisibleRef.current) {
+        return;
+      }
+
       const now = performance.now();
       const last = lastTsRef.current ?? now;
       const delta = now - last;
@@ -95,7 +124,7 @@ export function useChessClock({
       setTick((t) => t + 1);
     }
 
-    if (activeRef.current) {
+    if (activeRef.current && isPageVisibleRef.current) {
       // make sure lastTs is set immediately
       lastTsRef.current = performance.now();
       intId = setInterval(tick, tickIntervalMs);

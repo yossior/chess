@@ -9,17 +9,19 @@ import { useOnlineGame } from "../hooks/useOnlineGame";
 import ClockView from "./ClockView";
 import useClock from "../hooks/useClock";
 import MoveHistory from "./MoveHistory";
+import { useUser } from "../context/UserContext";
 
 export default function BoardWrapper() {
     const [mode, setMode] = useState("local");
     const [startFinding, setStartFinding] = useState(false);
     const [skillLevel, setSkillLevel] = useState(1);
+    const { user } = useUser();
 
     // The state controlling which move is shown (null = Live)
     const [viewIndex, setViewIndex] = useState(null);
 
     const clock = useClock();
-    const chess = useChessController(clock);
+    const chess = useChessController(clock, { enableClock: mode === "online" });
     const stockfish = useStockfish(chess.chessGame, chess.setChessPosition, chess, chess.setMoveHistory, chess.setHistoryIndex, chess.setTurn, skillLevel, clock);
     const online = useOnlineGame(
         chess.chessGameRef,
@@ -28,8 +30,16 @@ export default function BoardWrapper() {
         chess.setHistoryIndex,
         chess.setTurn,
         chess.playerColor,
-        chess.setPlayerColor
+        chess.setPlayerColor,
+        clock
     );
+
+    // Pause/clear clocks when leaving online mode
+    useEffect(() => {
+        if (mode !== "online" && clock?.pause) {
+            clock.pause();
+        }
+    }, [mode, clock]);
 
     // Auto-reset to "Live" when a real move happens
     useEffect(() => {
@@ -78,13 +88,6 @@ export default function BoardWrapper() {
     const gameStatus = chess.chessGame.isCheckmate() ? "Checkmate!" : chess.chessGame.isDraw() ? "Draw!" : chess.chessGame.isCheck() ? "Check!" : clock.status !== "" ? clock.status : "";
     const isMyTurn = chess ? (chess.turn === chess.playerColor) : false;
 
-    const { start: startClock } = clock;
-
-    useEffect(() => {
-        // Start the clock on mount using a stable name to avoid TDZ/conflicts
-        startClock();
-    }, [startClock]);
-
     function handleFindOnline() {
         setMode("online");
         setStartFinding(true);
@@ -104,12 +107,12 @@ export default function BoardWrapper() {
         if (!online) return;
 
         if (online.isConnected) {
-            online.findOnlineGame();
+            online.findOnlineGame(user?.id);
             handleOnlineStarted();
             return;
         }
         // when online.isConnected flips to true, this effect re-runs and will call findOnlineGame
-    }, [startFinding, online?.isConnected, online, handleOnlineStarted]);
+    }, [startFinding, online?.isConnected, online, handleOnlineStarted, user]);
 
 
 
@@ -150,16 +153,38 @@ export default function BoardWrapper() {
                 />
             </div>
 
-            {/* RIGHT PANEL: CLOCK + HISTORY */}
-            <div className="flex flex-col w-64 gap-2">
-                <ClockView timeMs={clock.blackMs} label="Black" />
-                <ClockView timeMs={clock.whiteMs} label="White" />
-
-                <MoveHistory
-                    moves={chess.chessGame.history({ verbose: true })}
-                    viewIndex={viewIndex}
-                    onNavigate={setViewIndex}
-                />
+            {/* RIGHT PANEL: CLOCKS + HISTORY */}
+            <div className="flex flex-col w-64 gap-4">
+                {mode === "online" ? (
+                    <>
+                        {/* Opponent clock at top */}
+                        <ClockView 
+                            timeMs={chess.playerColor === "w" ? clock.blackMs : clock.whiteMs} 
+                            label={chess.playerColor === "w" ? "Black" : "White"} 
+                        />
+                        
+                        <MoveHistory
+                            moves={chess.chessGame.history({ verbose: true })}
+                            viewIndex={viewIndex}
+                            onNavigate={setViewIndex}
+                        />
+                        
+                        {/* Player clock at bottom */}
+                        <ClockView 
+                            timeMs={chess.playerColor === "w" ? clock.whiteMs : clock.blackMs} 
+                            label={chess.playerColor === "w" ? "White" : "Black"} 
+                        />
+                    </>
+                ) : (
+                    <>
+                        <div className="text-sm text-gray-500 text-center py-2">Untimed game</div>
+                        <MoveHistory
+                            moves={chess.chessGame.history({ verbose: true })}
+                            viewIndex={viewIndex}
+                            onNavigate={setViewIndex}
+                        />
+                    </>
+                )}
             </div>
         </div>
     );

@@ -5,7 +5,7 @@ import { Chess } from "chess.js";
  * Minimal chess controller that exposes a single object (chess).
  * Expand this as needed (move validation UI helpers, PGN export, history, etc).
  */
-export function useChessController(clock) {
+export function useChessController(clock, { enableClock = true } = {}) {
   const chessGameRef = useRef(new Chess());
   const chessGame = chessGameRef.current;
 
@@ -18,10 +18,25 @@ export function useChessController(clock) {
   const [moveFrom, setMoveFrom] = useState("");
   const [optionSquares, setOptionSquares] = useState({});
   const [playerColor, setPlayerColor] = useState("w");
+  const [clockStarted, setClockStarted] = useState(false);
 
+  // When any move (local or remote) is recorded, enable clocks (if allowed)
   useEffect(() => {
-    if (clock?.isActive) clock.setActivePlayer(turn);
-  }, [turn, clock])
+    if (!enableClock) return;
+    if (!clockStarted && moveHistory.length > 0) {
+      setClockStarted(true);
+    }
+  }, [moveHistory.length, clockStarted, enableClock]);
+
+  // Switch clock only after the first move has been made and when clocks are enabled
+  useEffect(() => {
+    if (!clock?.start) return;
+    if (!enableClock) return;
+    if (!clockStarted) return;
+
+    const nextTurn = turn === "w" ? "white" : "black";
+    clock.start(nextTurn);
+  }, [turn, clock, clockStarted, enableClock]);
 
   // return an object (not destructured) so caller uses chess.someProp
   function getMoveOptions(square) {
@@ -48,6 +63,7 @@ export function useChessController(clock) {
       setMoveHistory((prev) => [...prev, move.san ?? `${from}${to}`]);
       setHistoryIndex(null);
       setTurn(chessGame.turn());
+      if (enableClock) setClockStarted(true);
       return move;
     } catch (e) {
       console.warn("invalid move", e);
@@ -65,7 +81,8 @@ export function useChessController(clock) {
     setMoveFrom("");
     setOptionSquares({});
     setPlayerColor("w");
-    clock.reset();
+    setClockStarted(false);
+    if (clock?.reset) clock.reset();
 
     console.log("Game reset");
 
