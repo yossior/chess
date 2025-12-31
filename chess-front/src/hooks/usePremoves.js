@@ -29,8 +29,9 @@ export default function usePremoves({ chessGame, chessController, clock, isAtLat
             promotion: moveResult.promotion
           });
         } else {
-          // Call Stockfish immediately to keep responsiveness in dev and tests.
-          makeStockfishMove?.();
+          setTimeout(() => {
+            makeStockfishMove?.();
+          }, 3000);
         }
 
         const remaining = premovesRef.current.slice(1);

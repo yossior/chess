@@ -8,8 +8,16 @@ export default function useClock(initialTime = 300) {
     const [blackMs, setBlackMs] = useState(initialTime * 1000);
     const [status, setStatus] = useState("");
 
-    const whiteIntervalRef = useRef(null);
-    const blackIntervalRef = useRef(null);
+    const animationFrameRef = useRef(null);
+    
+    // Track reference time for accurate countdown
+    const clockStateRef = useRef({ 
+        whiteMs: initialTime * 1000, 
+        blackMs: initialTime * 1000, 
+        lastUpdateTime: Date.now(),
+        activePlayer: null,
+        isActive: false
+    });
 
     const isTimeout = useCallback(() => status !== "", [status]);
 
@@ -17,13 +25,14 @@ export default function useClock(initialTime = 300) {
     const flag = useCallback((player) => {
         setIsActive(false);
         setActivePlayer(null);
-        clearInterval(whiteIntervalRef.current);
-        clearInterval(blackIntervalRef.current);
+        if (animationFrameRef.current) {
+            cancelAnimationFrame(animationFrameRef.current);
+        }
+        clockStateRef.current.isActive = false;
         setStatus(`${player == 'w' ? 'White' : 'Black'} flagged!`);
     }, []);
 
-    // 1. NEW EFFECT: Monitor time remaining
-    // This runs every time whiteMs or blackMs updates.
+    // 1. Monitor time remaining
     useEffect(() => {
         if (whiteMs <= 0 && status === "") {
             flag("w");
@@ -33,34 +42,52 @@ export default function useClock(initialTime = 300) {
         }
     }, [whiteMs, blackMs, status, flag]);
 
-
-
-    // 2. UPDATED EFFECT: Handle the ticking intervals only
+    // 2. Use requestAnimationFrame for precise timing that works in background
     useEffect(() => {
-        if (!isActive) return;
-
-        if (activePlayer === "w") {
-            clearInterval(blackIntervalRef.current);
-            whiteIntervalRef.current = setInterval(() => {
-                // We only handle subtraction here. 
-                // The state update triggers the effect above to check for <= 0.
-                setWhiteMs((prev) => prev - 100);
-            }, 100);
-        } else {
-            clearInterval(whiteIntervalRef.current);
-            blackIntervalRef.current = setInterval(() => {
-                setBlackMs((prev) => prev - 100);
-            }, 100);
+        if (!isActive || !activePlayer) {
+            if (animationFrameRef.current) {
+                cancelAnimationFrame(animationFrameRef.current);
+            }
+            clockStateRef.current.isActive = false;
+            return;
         }
 
-        return () => {
-            clearInterval(whiteIntervalRef.current);
-            clearInterval(blackIntervalRef.current);
+        clockStateRef.current.isActive = true;
+        clockStateRef.current.activePlayer = activePlayer;
+        clockStateRef.current.lastUpdateTime = Date.now();
+
+        const updateClock = () => {
+            const now = Date.now();
+            const elapsed = now - clockStateRef.current.lastUpdateTime;
+            clockStateRef.current.lastUpdateTime = now;
+
+            if (clockStateRef.current.activePlayer === "w") {
+                const newWhite = Math.max(0, clockStateRef.current.whiteMs - elapsed);
+                clockStateRef.current.whiteMs = newWhite;
+                setWhiteMs(newWhite);
+            } else if (clockStateRef.current.activePlayer === "b") {
+                const newBlack = Math.max(0, clockStateRef.current.blackMs - elapsed);
+                clockStateRef.current.blackMs = newBlack;
+                setBlackMs(newBlack);
+            }
+
+            if (clockStateRef.current.isActive) {
+                animationFrameRef.current = requestAnimationFrame(updateClock);
+            }
         };
-    }, [activePlayer, isActive]); // Added isActive to dependencies
+
+        animationFrameRef.current = requestAnimationFrame(updateClock);
+
+        return () => {
+            if (animationFrameRef.current) {
+                cancelAnimationFrame(animationFrameRef.current);
+            }
+        };
+    }, [activePlayer, isActive]);
 
     const start = useCallback((side = "w") => {
         if (side !== "w" && side !== "b" && side !== null) return;
+        clockStateRef.current.lastUpdateTime = Date.now();
         setIsActive(true);
         setActivePlayer(side);
     }, []);
@@ -68,21 +95,48 @@ export default function useClock(initialTime = 300) {
     const pause = useCallback(() => {
         setIsActive(false);
         setActivePlayer(null);
-        clearInterval(whiteIntervalRef.current);
-        clearInterval(blackIntervalRef.current);
+        if (animationFrameRef.current) {
+            cancelAnimationFrame(animationFrameRef.current);
+        }
+        clockStateRef.current.isActive = false;
     }, []);
 
     const reset = useCallback(() => {
-        clearInterval(whiteIntervalRef.current);
-        clearInterval(blackIntervalRef.current);
-        setWhiteMs(initialTime * 1000);
-        setBlackMs(initialTime * 1000);
+        if (animationFrameRef.current) {
+            cancelAnimationFrame(animationFrameRef.current);
+        }
+        const resetTime = initialTime * 1000;
+        setWhiteMs(resetTime);
+        setBlackMs(resetTime);
+        clockStateRef.current.whiteMs = resetTime;
+        clockStateRef.current.blackMs = resetTime;
+        clockStateRef.current.lastUpdateTime = Date.now();
         setIsActive(false);
         setActivePlayer(null);
         setStatus("");
     }, [initialTime]);
 
+    /**
+     * Synchronize clock times from server (for online play)
+     * This ensures both players' clocks match the server state
+     */
+    const syncFromServer = useCallback((serverWhiteMs, serverBlackMs, activePlayerColor, opts = {}) => {
+        const { startClock = false } = opts;
 
+        // Update both state and ref for accurate tracking
+        setWhiteMs(serverWhiteMs);
+        setBlackMs(serverBlackMs);
+        clockStateRef.current.whiteMs = serverWhiteMs;
+        clockStateRef.current.blackMs = serverBlackMs;
+        clockStateRef.current.lastUpdateTime = Date.now();
+
+        if (startClock && activePlayerColor) {
+            const player = activePlayerColor === "w" ? "w" : "b";
+            clockStateRef.current.activePlayer = player;
+            setActivePlayer(player);
+            setIsActive(true);
+        }
+    }, []);
 
     return {
         isActive,
@@ -94,6 +148,7 @@ export default function useClock(initialTime = 300) {
         pause,
         status,
         isTimeout,
-        reset
+        reset,
+        syncFromServer
     };
 }

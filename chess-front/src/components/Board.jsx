@@ -89,7 +89,7 @@ export default function Board({ chess, mode = "local", opponent, clock, viewInde
       setTimeout(() => {
         if (chess.chessGame.isGameOver() || clock.isTimeout()) return;
         opponent?.makeStockfishMove?.()
-      }, 300);
+      }, 3000);
     }
   }
 
@@ -181,7 +181,7 @@ export default function Board({ chess, mode = "local", opponent, clock, viewInde
       setTimeout(() => {
         if (chess.chessGame.isGameOver() || clock.isTimeout()) return;
         opponent?.makeStockfishMove?.()
-      }, 300);
+      }, 3000);
     }
     return true;
   }
