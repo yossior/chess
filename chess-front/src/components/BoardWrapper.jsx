@@ -14,7 +14,6 @@ import { useOnlineGame } from "../hooks/useOnlineGame";
 import ClockView from "./ClockView";
 import useClock from "../hooks/useClock";
 import MoveHistory from "./MoveHistory";
-import { useUser } from "../context/UserContext";
 
 export default function BoardWrapper() {
     const [mode, setMode] = useState(null); // null, "local", "friend" - null means no game started
@@ -23,15 +22,14 @@ export default function BoardWrapper() {
     const [showRules, setShowRules] = useState(false);
     const [showAbout, setShowAbout] = useState(false);
     const [startFinding, setStartFinding] = useState(false);
-    const [skillLevel, setSkillLevel] = useState(5); // Default to Intermediate (balanced)
+    const [skillLevel, setSkillLevel] = useState(2); // Default to Normal
     const [playerColor, setPlayerColor] = useState("w"); // Default to White
     const [isUnbalanced, setIsUnbalanced] = useState(true); // Default to Unbalanced
     const [pendingGameId, setPendingGameId] = useState(null); // Track game ID from URL
     const [pendingCreateSettings, setPendingCreateSettings] = useState(null); // Track creator settings if socket not ready
     const [flipBoard, setFlipBoard] = useState(false);
     const [gameOverInfo, setGameOverInfo] = useState(null);
-    const [gameStarted, setGameStarted] = useState(false); // Track if game has been started
-    const { user } = useUser();
+    const [gameStarted, setGameStarted] = useState(false); // 
     const { toast, showToast } = useToast();
 
     // The state controlling which move is shown (null = Live)

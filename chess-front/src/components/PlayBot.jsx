@@ -1,6 +1,6 @@
 import { useState } from 'react';
 
-export default function PlayBot({ onStartGame, onBack, initialSkillLevel = 5, initialPlayerColor = 'w', initialIsUnbalanced = true }) {
+export default function PlayBot({ onStartGame, onBack, initialSkillLevel = 2, initialPlayerColor = 'w', initialIsUnbalanced = true }) {
   const [selectedColor, setSelectedColor] = useState(initialPlayerColor);
   const [skillLevel, setSkillLevel] = useState(initialSkillLevel);
   const [isUnbalanced, setIsUnbalanced] = useState(initialIsUnbalanced);
@@ -94,19 +94,21 @@ export default function PlayBot({ onStartGame, onBack, initialSkillLevel = 5, in
         <div>
           <div className="flex justify-between items-center mb-2">
             <label className="text-xs font-medium text-slate-400">Bot Strength</label>
-            <span className="text-xs text-slate-300">{skillLevel}/10</span>
           </div>
-          <input
-            type="range"
-            min="1"
-            max="10"
-            value={skillLevel}
-            onChange={(e) => setSkillLevel(Number(e.target.value))}
-            className="w-full h-1.5 bg-slate-600 rounded-lg appearance-none cursor-pointer accent-slate-400"
-          />
-          <div className="flex justify-between text-xs text-slate-500 mt-1">
-            <span>Beginner</span>
-            <span>Master</span>
+          <div className="grid grid-cols-3 gap-2">
+            {[1, 2, 3].map((level) => (
+              <button
+                key={level}
+                onClick={() => setSkillLevel(level)}
+                className={`py-2 px-2 rounded-lg text-sm font-medium transition-all ${
+                  skillLevel === level
+                    ? 'bg-slate-200 text-slate-900'
+                    : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                }`}
+              >
+                {level === 1 ? 'Easy' : level === 2 ? 'Normal' : 'Hard'}
+              </button>
+            ))}
           </div>
         </div>
 
