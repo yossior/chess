@@ -1,335 +1,694 @@
 import { Chess } from 'chess.js';
 
-console.log('[marseillais.worker] ===== WORKER STARTING v2.0 =====');
+console.log('[marseillais.worker] v2.0 worker started');
 
-const MATE = 100000;
-const VALS = { p: 100, n: 320, b: 330, r: 500, q: 900, k: 20000 };
+const MATE = 30000;
+const INF = 32000;
 
-const PST = {
-  p: [[0,0,0,0,0,0,0,0],[50,50,50,50,50,50,50,50],[10,10,20,30,30,20,10,10],[5,5,10,25,25,10,5,5],[0,0,0,20,20,0,0,0],[5,-5,-10,0,0,-10,-5,5],[5,10,10,-20,-20,10,10,5],[0,0,0,0,0,0,0,0]],
-  n: [[-50,-40,-30,-30,-30,-30,-40,-50],[-40,-20,0,0,0,0,-20,-40],[-30,0,10,15,15,10,0,-30],[-30,5,15,20,20,15,5,-30],[-30,0,15,20,20,15,0,-30],[-30,5,10,15,15,10,5,-30],[-40,-20,0,5,5,0,-20,-40],[-50,-40,-30,-30,-30,-30,-40,-50]],
-  b: [[-20,-10,-10,-10,-10,-10,-10,-20],[-10,0,0,0,0,0,0,-10],[-10,0,5,10,10,5,0,-10],[-10,5,5,10,10,5,5,-10],[-10,0,10,10,10,10,0,-10],[-10,10,10,10,10,10,10,-10],[-10,5,0,0,0,0,5,-10],[-20,-10,-10,-10,-10,-10,-10,-20]],
-  r: [[0,0,0,0,0,0,0,0],[-5,-5,-5,-5,-5,-5,-5,-5],[-5,0,0,0,0,0,0,-5],[-5,0,0,0,0,0,0,-5],[-5,0,0,0,0,0,0,-5],[-5,0,0,0,0,0,0,-5],[-5,0,0,0,0,0,0,-5],[0,0,0,5,5,0,0,0]],
-  q: [[-20,-10,-10,-5,-5,-10,-10,-20],[-10,0,0,0,0,0,0,-10],[-10,0,5,5,5,5,0,-10],[0,0,5,5,5,5,0,-5],[-5,0,5,5,5,5,0,-5],[-10,5,5,5,5,5,0,-10],[-10,0,5,0,0,0,0,-10],[-20,-10,-10,-5,-5,-10,-10,-20]],
-  k: [[-30,-40,-40,-50,-50,-40,-40,-30],[-30,-40,-40,-50,-50,-40,-40,-30],[-30,-40,-40,-50,-50,-40,-40,-30],[-30,-40,-40,-50,-50,-40,-40,-30],[-20,-30,-30,-40,-40,-30,-30,-20],[-10,-20,-20,-20,-20,-20,-20,-10],[20,20,0,0,0,0,20,20],[20,30,10,0,0,10,30,20]]
+const PIECE_VALUES = {
+  p: 100,
+  n: 320,
+  b: 330,
+  r: 500,
+  q: 900,
+  k: 20000
 };
 
-function ev(g) {
-  if (g.isCheckmate()) {
-    // Checkmate: current player (to move) is mated, so they lose
-    return -MATE;
-  }
-  if (g.isDraw() || g.isStalemate() || g.isThreefoldRepetition() || g.isInsufficientMaterial()) {
-    return 0;
-  }
-  
-  const turn = g.turn();
-  let s = 0;
-  const b = g.board();
-  for (let r = 0; r < 8; r++) {
-    for (let c = 0; c < 8; c++) {
-      const p = b[r][c];
-      if (!p) continue;
-      const v = VALS[p.type] + PST[p.type][p.color === 'w' ? r : 7-r][c];
-      s += p.color === 'w' ? v : -v;
-    }
-  }
-  
-  // Return score from current player's perspective
-  return turn === 'w' ? s : -s;
+// MVV-LVA for capture ordering
+const MVV_LVA = {
+  p: 100,
+  n: 320,
+  b: 330,
+  r: 500,
+  q: 900,
+  k: 0
+};
+
+// Piece-Square Tables
+const PST = {
+  p: [
+    [0, 0, 0, 0, 0, 0, 0, 0],
+    [50, 50, 50, 50, 50, 50, 50, 50],
+    [10, 10, 20, 30, 30, 20, 10, 10],
+    [5, 5, 10, 25, 25, 10, 5, 5],
+    [0, 0, 0, 20, 20, 0, 0, 0],
+    [5, -5, -10, 0, 0, -10, -5, 5],
+    [5, 10, 10, -20, -20, 10, 10, 5],
+    [0, 0, 0, 0, 0, 0, 0, 0]
+  ],
+  n: [
+    [-50, -40, -30, -30, -30, -30, -40, -50],
+    [-40, -20, 0, 0, 0, 0, -20, -40],
+    [-30, 0, 10, 15, 15, 10, 0, -30],
+    [-30, 5, 15, 20, 20, 15, 5, -30],
+    [-30, 0, 15, 20, 20, 15, 0, -30],
+    [-30, 5, 10, 15, 15, 10, 5, -30],
+    [-40, -20, 0, 5, 5, 0, -20, -40],
+    [-50, -40, -30, -30, -30, -30, -40, -50]
+  ],
+  b: [
+    [-20, -10, -10, -10, -10, -10, -10, -20],
+    [-10, 0, 0, 0, 0, 0, 0, -10],
+    [-10, 0, 5, 10, 10, 5, 0, -10],
+    [-10, 5, 5, 10, 10, 5, 5, -10],
+    [-10, 0, 10, 10, 10, 10, 0, -10],
+    [-10, 10, 10, 10, 10, 10, 10, -10],
+    [-10, 5, 0, 0, 0, 0, 5, -10],
+    [-20, -10, -10, -10, -10, -10, -10, -20]
+  ],
+  r: [
+    [0, 0, 0, 0, 0, 0, 0, 0],
+    [5, 10, 10, 10, 10, 10, 10, 5],
+    [-5, 0, 0, 0, 0, 0, 0, -5],
+    [-5, 0, 0, 0, 0, 0, 0, -5],
+    [-5, 0, 0, 0, 0, 0, 0, -5],
+    [-5, 0, 0, 0, 0, 0, 0, -5],
+    [-5, 0, 0, 0, 0, 0, 0, -5],
+    [0, 0, 0, 5, 5, 0, 0, 0]
+  ],
+  q: [
+    [-20, -10, -10, -5, -5, -10, -10, -20],
+    [-10, 0, 0, 0, 0, 0, 0, -10],
+    [-10, 0, 5, 5, 5, 5, 0, -10],
+    [-5, 0, 5, 5, 5, 5, 0, -5],
+    [0, 0, 5, 5, 5, 5, 0, -5],
+    [-10, 5, 5, 5, 5, 5, 0, -10],
+    [-10, 0, 5, 0, 0, 0, 0, -10],
+    [-20, -10, -10, -5, -5, -10, -10, -20]
+  ],
+  k: [
+    [-30, -40, -40, -50, -50, -40, -40, -30],
+    [-30, -40, -40, -50, -50, -40, -40, -30],
+    [-30, -40, -40, -50, -50, -40, -40, -30],
+    [-30, -40, -40, -50, -50, -40, -40, -30],
+    [-20, -30, -30, -40, -40, -30, -30, -20],
+    [-10, -20, -20, -20, -20, -20, -20, -10],
+    [20, 20, 0, 0, 0, 0, 20, 20],
+    [20, 30, 10, 0, 0, 10, 30, 20]
+  ]
+};
+
+// Endgame king table (encourages centralization)
+const PST_KING_ENDGAME = [
+  [-50, -40, -30, -20, -20, -30, -40, -50],
+  [-30, -20, -10, 0, 0, -10, -20, -30],
+  [-30, -10, 20, 30, 30, 20, -10, -30],
+  [-30, -10, 30, 40, 40, 30, -10, -30],
+  [-30, -10, 30, 40, 40, 30, -10, -30],
+  [-30, -10, 20, 30, 30, 20, -10, -30],
+  [-30, -30, 0, 0, 0, 0, -30, -30],
+  [-50, -30, -30, -30, -30, -30, -30, -50]
+];
+
+// =============================================================================
+//  GLOBALS
+// =============================================================================
+const killerMoves = new Map(); // [ply] -> Set of move keys
+const historyHeuristic = new Map(); // move key -> score
+const TT = new Map(); // Transposition table
+
+let tStart = 0;
+let tLimit = 0;
+let nodes = 0;
+let qNodes = 0;
+const QNODE_LIMIT = 2000; // safety cap for quiescence nodes
+
+const auxChess = new Chess();
+
+
+function canonicalFenKey(fen) {
+  return fen.split(' ').slice(0, 4).join(' ');
 }
 
-function genMoves(g) {
-  const res = [];
-  const m1s = g.moves({ verbose: true });
-  for (const m1 of m1s) {
-    g.move(m1);
-    if (g.inCheck() || g.isGameOver()) {
-      res.push([m1]);
-    } else {
-      // For second move, flip turn back to same color (Marseillais rule)
-      try {
-        const flippedFen = flipTurn(g.fen());
-        const g2 = new Chess(flippedFen);
-        const m2s = g2.moves({ verbose: true });
-        if (m2s.length === 0) res.push([m1]);
-        else for (const m2 of m2s) res.push([m1, m2]);
-      } catch (e) {
-        console.error('[WORKER] genMoves error:', e.message);
-        res.push([m1]);
-      }
-    }
-    g.undo();
-  }
-  return res;
-}
-
-function sc(p) {
-  let s = 0;
-  for (const m of p) {
-    // Checks are EXTREMELY valuable - prioritize them
-    if (m.san && (m.san.includes('+') || m.san.includes('#'))) s += 10000;
-    // Captures
-    if (m.captured) s += VALS[m.captured] * 100;
-    // Promotions
-    if (m.promotion) s += 9000;
-  }
-  return s;
-}
-
-let tStart = 0, tLimit = 0;
-
-function quiesce(g, a, b, d = 0) {
-  if (d >= 4 || Date.now() - tStart > tLimit) return ev(g);
-  const stand = ev(g);
-  if (stand >= b) return b;
-  if (stand > a) a = stand;
-  
-  const caps = g.moves({ verbose: true }).filter(m => m.captured);
-  caps.sort((x,y) => VALS[y.captured] - VALS[x.captured]);
-  
-  for (const m of caps.slice(0, 5)) {
-    g.move(m);
-    const s = -quiesce(g, -b, -a, d + 1);
-    g.undo();
-    if (s >= b) return b;
-    if (s > a) a = s;
-  }
-  return a;
-}
-
-function flipTurn(fen) {
+function flipTurnInFen(fen) {
   const parts = fen.split(' ');
-  parts[1] = parts[1] === 'w' ? 'b' : 'w'; // Flip active color
-  parts[3] = '-'; // Clear en passant
-  // Keep halfmove and fullmove counters intact (parts[4] and parts[5])
+  parts[1] = parts[1] === 'w' ? 'b' : 'w';
+  parts[3] = '-';
   return parts.join(' ');
 }
 
-function applyPair(g, pair) {
-  const fen = g.fen();
-  const startTurn = g.turn();
-  
+function pairKey(pair) {
+  if (!pair || pair.length === 0) return '';
+  let s = pair[0].from + pair[0].to + (pair[0].promotion || '');
+  if (pair[1]) s += ';' + pair[1].from + pair[1].to + (pair[1].promotion || '');
+  return s;
+}
+
+function rankOf(square) {
+  return parseInt(square[1]) - 1;
+}
+
+function fileOf(square) {
+  return square.charCodeAt(0) - 97;
+}
+
+
+function evaluatePosition(g) {
   try {
-    // Apply first move
-    const m1 = g.move({ from: pair[0].from, to: pair[0].to, promotion: pair[0].promotion });
-    if (!m1) {
-      console.error('[WORKER] invalid first move:', pair[0]);
-      return fen;
+    if (g.isCheckmate()) return -MATE;
+    if (g.isDraw() || g.isStalemate() || g.isThreefoldRepetition()) return 0;
+
+    const board = g.board();
+    const turn = g.turn();
+    
+    let materialScore = 0;
+    let positionalScore = 0;
+    let mobilityScore = 0;
+    
+    // Count material for endgame detection
+    let totalMaterial = 0;
+    const whitePieces = { p: 0, n: 0, b: 0, r: 0, q: 0, k: 0 };
+    const blackPieces = { p: 0, n: 0, b: 0, r: 0, q: 0, k: 0 };
+    
+    for (let r = 0; r < 8; r++) {
+      for (let c = 0; c < 8; c++) {
+        const p = board[r][c];
+        if (!p) continue;
+        
+        if (p.color === 'w') whitePieces[p.type]++;
+        else blackPieces[p.type]++;
+        
+        totalMaterial += PIECE_VALUES[p.type] || 0;
+      }
     }
     
-    // Check if game over after first move
-    if (g.inCheck() || g.isGameOver()) {
-      // Single move only - flip turn to opponent (currently it's opponent's turn after m1, keep it)
-      // NO flip needed - chess.js already switched turns after m1
-      return fen;
+    const isEndgame = totalMaterial < 2500;
+    
+    // Evaluate each piece
+    for (let r = 0; r < 8; r++) {
+      for (let c = 0; c < 8; c++) {
+        const p = board[r][c];
+        if (!p) continue;
+
+        const mult = p.color === 'w' ? 1 : -1;
+        const pstR = p.color === 'w' ? r : 7 - r;
+        
+        // Material value
+        materialScore += mult * (PIECE_VALUES[p.type] || 0);
+        
+        // Positional value
+        if (p.type === 'k' && isEndgame) {
+          positionalScore += mult * (PST_KING_ENDGAME[pstR]?.[c] || 0);
+        } else {
+          positionalScore += mult * (PST[p.type]?.[pstR]?.[c] || 0);
+        }
+      }
     }
     
-    if (pair.length > 1) {
-      // After m1, it's opponent's turn. For Marseillais, flip back so same player moves again
-      g.load(flipTurn(g.fen()));
+    // Mobility bonus (pseudo-legal moves)
+    const myMoves = g.moves().length;
+    
+    // Create a copy to check opponent mobility
+    let oppMoves = 0;
+    try {
+      const gCopy = new Chess(g.fen());
+      gCopy.load(flipTurnInFen(g.fen()));
+      oppMoves = gCopy.moves().length;
+    } catch (e) {
+      // If flipping fails, just use 0 for opponent mobility
+    }
+    
+    mobilityScore = (myMoves - oppMoves) * 10;
+    
+    // King safety in opening/midgame
+    let kingSafety = 0;
+    if (!isEndgame) {
+      kingSafety = evaluateKingSafety(board, turn);
+    }
+    
+    // Pawn structure bonuses
+    const pawnScore = evaluatePawnStructure(board, whitePieces, blackPieces);
+    
+    // Center control
+    const centerControl = evaluateCenterControl(board);
+    
+    // Marseillais initiative bonus (having the move is powerful)
+    const tempoBonus = 30;
+    
+    const total = materialScore + positionalScore + mobilityScore + 
+                  kingSafety + pawnScore + centerControl + tempoBonus;
+    
+    return turn === 'w' ? total : -total;
+  } catch (err) {
+    console.error('[WORKER] Error in evaluatePosition:', err);
+    return 0;
+  }
+}
+
+function evaluateKingSafety(board, turn) {
+  let safety = 0;
+  
+  for (let r = 0; r < 8; r++) {
+    for (let c = 0; c < 8; c++) {
+      const p = board[r][c];
+      if (!p || p.type !== 'k') continue;
       
-      const m2 = g.move({ from: pair[1].from, to: pair[1].to, promotion: pair[1].promotion });
-      if (!m2) {
-        console.error('[WORKER] invalid second move:', pair[1]);
-        g.load(fen);
-        return fen;
+      const mult = p.color === turn ? 1 : -1;
+      const pstR = p.color === 'w' ? r : 7 - r;
+      
+      // Penalize exposed king
+      if (pstR > 5) { // King on back two ranks is safer
+        safety += mult * 10;
       }
       
-      // After m2, chess.js flipped turn back to opponent, which is CORRECT
-      // NO additional flip needed!
+      // Check pawn shield
+      if (p.color === 'w' && pstR < 2) {
+        const shieldSquares = [[r+1,c-1], [r+1,c], [r+1,c+1]];
+        for (const [sr, sc] of shieldSquares) {
+          if (sr >= 0 && sr < 8 && sc >= 0 && sc < 8) {
+            const shield = board[sr][sc];
+            if (shield && shield.type === 'p' && shield.color === 'w') {
+              safety += mult * 5;
+            }
+          }
+        }
+      } else if (p.color === 'b' && pstR > 5) {
+        const shieldSquares = [[r-1,c-1], [r-1,c], [r-1,c+1]];
+        for (const [sr, sc] of shieldSquares) {
+          if (sr >= 0 && sr < 8 && sc >= 0 && sc < 8) {
+            const shield = board[sr][sc];
+            if (shield && shield.type === 'p' && shield.color === 'b') {
+              safety += mult * 5;
+            }
+          }
+        }
+      }
     }
-  } catch (e) {
-    console.error('[WORKER] applyPair error:', e.message, 'fen:', g.fen());
-    g.load(fen);
   }
   
-  return fen;
+  return safety;
 }
 
-function search(g, d, a, b, root = false) {
-  if (Date.now() - tStart > tLimit) return ev(g);
+function evaluatePawnStructure(board, whitePieces, blackPieces) {
+  let score = 0;
   
-  // Check for immediate mate/draw
-  if (g.isGameOver()) {
-    return ev(g);
-  }
-  
-  if (d <= 0) return quiesce(g, a, b);
-  
-  const moves = genMoves(g);
-  if (!moves.length) return ev(g);
-  
-  moves.sort((x,y) => sc(y) - sc(x));
-  
-  // At root, search more moves; deeper down, prune aggressively
-  const lim = root ? 20 : (d >= 3 ? 8 : (d >= 2 ? 12 : 18));
-  const caps = moves.filter(p => p.some(m => m.captured));
-  const quiet = moves.filter(p => !p.some(m => m.captured));
-  const searchMoves = [...caps.slice(0, 10), ...quiet.slice(0, Math.max(0, lim - Math.min(10, caps.length)))];
-  
-  let best = -Infinity;
-  for (const pair of searchMoves) {
-    if (Date.now() - tStart > tLimit) break;
+  // Doubled pawns penalty
+  for (let c = 0; c < 8; c++) {
+    let whitePawnsInFile = 0;
+    let blackPawnsInFile = 0;
     
-    const fen = applyPair(g, pair);
-    
-    // Check if we just delivered checkmate
-    if (g.isCheckmate()) {
-      g.load(fen);
-      if (root) console.log('[WORKER] MATE FOUND: ' + pair.map(m=>m.san).join('+'));
-      return MATE; // We delivered mate, we win!
+    for (let r = 0; r < 8; r++) {
+      const p = board[r][c];
+      if (p && p.type === 'p') {
+        if (p.color === 'w') whitePawnsInFile++;
+        else blackPawnsInFile++;
+      }
     }
     
-    // After applyPair, turn is already set correctly for opponent
-    const s = -search(g, d - 1, -b, -a, false);
-    g.load(fen);
-    
-    if (root && s > best) {
-      console.log('[WORKER] depth=' + d + ' move=' + pair.map(m=>m.san).join('+') + ' score=' + s);
-    }
-    
-    best = Math.max(best, s);
-    a = Math.max(a, s);
-    if (a >= b) break;
+    if (whitePawnsInFile > 1) score -= (whitePawnsInFile - 1) * 10;
+    if (blackPawnsInFile > 1) score += (blackPawnsInFile - 1) * 10;
   }
-  return best;
+  
+  // Passed pawn bonus
+  score += whitePieces.p * 2 - blackPieces.p * 2;
+  
+  return score;
 }
 
-function findBestMove(fen, level = 5) {
-  console.log('[WORKER ENGINE] START level=' + level + ' fen=' + fen.substring(0, 40));
+function evaluateCenterControl(board) {
+  let score = 0;
+  const centerSquares = [[3,3], [3,4], [4,3], [4,4]];
+  const extendedCenter = [[2,2], [2,3], [2,4], [2,5], [3,2], [3,5], [4,2], [4,5], [5,2], [5,3], [5,4], [5,5]];
+  
+  for (const [r, c] of centerSquares) {
+    const p = board[r][c];
+    if (p) {
+      const mult = p.color === 'w' ? 1 : -1;
+      score += mult * 15;
+    }
+  }
+  
+  for (const [r, c] of extendedCenter) {
+    const p = board[r][c];
+    if (p) {
+      const mult = p.color === 'w' ? 1 : -1;
+      score += mult * 5;
+    }
+  }
+  
+  return score;
+}
+
+function getMarseillaisMoves(g, onlyTactical = false) {
+  const moves = [];
+  let m1s = g.moves({ verbose: true });
+
+  // When tactical-only, reduce m1 candidates to capture/check candidates to avoid explosion
+  if (onlyTactical) {
+    // Prefer captures and checks
+    const m1Candidates = m1s.filter(m => m.captured || m.san.includes('+') || m.san.includes('#'));
+    if (m1Candidates.length === 0) {
+      // fallback to top few moves
+      m1s = m1s.slice(0, Math.min(10, m1s.length));
+    } else {
+      // limit to best 12 tactical first moves
+      m1s = m1Candidates.slice(0, Math.min(12, m1Candidates.length));
+    }
+  }
+
+  for (const m1 of m1s) {
+    const result = g.move(m1);
+    if (!result) continue;
+
+    // First move gives check → turn ends
+    const inCheck = g.inCheck();
+    if (g.isGameOver() || inCheck) {
+      if (!onlyTactical || m1.captured || inCheck) {
+        moves.push([m1]);
+      }
+      g.undo();
+      continue;
+    }
+
+    const fenAfterM1 = g.fen();
+    const fenFlipped = flipTurnInFen(fenAfterM1);
+
+    try {
+      // Use a fresh chess instance for second move generation to avoid shared-state bugs
+      const g2 = new Chess(fenFlipped);
+      let m2s = g2.moves({ verbose: true });
+
+      if (onlyTactical) {
+        // Filter m2s to captures/checks/promotions only and limit their number
+        m2s = m2s.filter(m => m.captured || m.promotion || m.san.includes('+') || m.san.includes('#'));
+        // Prioritize captures (MVV-LVA) by captured piece value
+        m2s.sort((a, b) => (MVV_LVA[b.captured] || 0) - (MVV_LVA[a.captured] || 0));
+        m2s = m2s.slice(0, Math.min(8, m2s.length));
+      }
+
+      if (m2s.length === 0) {
+        if (!onlyTactical || m1.captured) {
+          moves.push([m1]);
+        }
+      } else {
+        for (const m2 of m2s) moves.push([m1, m2]);
+      }
+    } catch (err) {
+      // Bad FEN, skip
+    }
+
+    g.undo();
+  }
+  return moves;
+}
+
+function applyPairToFen(fen, pair) {
+  if (!pair || !pair[0]) return null;
   try {
     const g = new Chess(fen);
-    const moves = genMoves(g);
-    console.log('[WORKER ENGINE] ' + moves.length + ' moves, turn=' + g.turn());
+
+    const m1 = g.move(pair[0]);
+    if (!m1) return null;
+
+    if (g.inCheck() || g.isGameOver()) {
+      return g.fen();
+    }
+
+    if (pair.length > 1) {
+      const midFen = g.fen();
+      const flipped = flipTurnInFen(midFen);
+
+      const g2 = new Chess(flipped);
+      const m2 = g2.move(pair[1]);
+      if (!m2) return null;
+
+      return g2.fen();
+    }
+
+    return g.fen();
+  } catch (e) {
+    return null;
+  }
+}
+
+//  Move ordering for efficiency
+
+function scoreMovePair(pair, depth, pvMove) {
+  let score = 0;
+  const key = pairKey(pair);
+  
+  // PV move gets highest priority
+  if (pvMove && key === pvMove) {
+    return 1000000;
+  }
+  
+  // Killer moves
+  const killers = killerMoves.get(depth);
+  if (killers && killers.has(key)) {
+    score += 50000;
+  }
+  
+  // History heuristic
+  score += (historyHeuristic.get(key) || 0);
+  
+// MVV-LVA for captures, promotions and checks/mates
+  for (const m of pair) {
+    if (!m) continue;
+
+    if (m.captured) {
+      const victim = MVV_LVA[m.captured] || 0;
+      const attacker = MVV_LVA[m.piece] || 0;
+      score += 10000 + (victim * 10 - attacker);
+    }
+
+    if (m.promotion) {
+      score += 8000;
+    }
+
+    if (m.san.includes('#')) {
+      score += 20000; // mate in root should be highest priority
+    } else if (m.san.includes('+')) {
+      score += 5000;
+    }
+  }
+  
+  return score;
+}
+
+// Search
+
+function quiesce(g, alpha, beta, depth = 0) {
+  try {
+    qNodes++;
+    if (qNodes > QNODE_LIMIT) {
+      if ((qNodes & 31) === 0) console.warn('[WORKER] QNode limit reached:', qNodes);
+      return alpha;
+    }
+    if (Date.now() - tStart > tLimit) return alpha;
+
+    // Quiescence depth limit
+    if (depth > 3) return evaluatePosition(g);
+
+    const standPat = evaluatePosition(g);
+    if (standPat >= beta) return beta;
     
-    // Debug: Look for queen moves
-    const queenMoves = moves.filter(p => p.some(m => m.piece === 'q'));
-    console.log('[WORKER ENGINE] found ' + queenMoves.length + ' queen moves, examples:', queenMoves.slice(0, 3).map(p => p.map(m => m.san).join('+')));
+    // Delta pruning
+    const BIG_DELTA = 900; // Queen value
+    if (standPat < alpha - BIG_DELTA) return alpha;
     
-    if (!moves.length) {
-      console.log('[WORKER ENGINE] NO MOVES');
-      return [];
+    if (alpha < standPat) alpha = standPat;
+
+    const moves = getMarseillaisMoves(g, true);
+    moves.sort((a, b) => scoreMovePair(b, 0, null) - scoreMovePair(a, 0, null));
+
+    // Debug/logging for long tactical lists
+    if (moves.length > 20 && (qNodes & 127) === 0) console.log('[WORKER] Quiesce has', moves.length, 'tactical moves at depth', depth);
+
+    const moveLimit = Math.min(moves.length, 12);
+    for (let i = 0; i < moveLimit; i++) {
+      if (Date.now() - tStart > tLimit) return alpha;
+      const pair = moves[i];
+      const fen = g.fen();
+      const nextFen = applyPairToFen(fen, pair);
+      if (!nextFen) continue;
+
+      const nextG = new Chess(nextFen);
+      const score = -quiesce(nextG, -beta, -alpha, depth + 1);
+
+      if (score >= beta) return beta;
+      if (score > alpha) alpha = score;
+    }
+
+    return alpha;
+  } catch (err) {
+    console.error('[WORKER] Error in quiesce:', err);
+    return alpha;
+  }
+}
+
+function alphabeta(g, depth, alpha, beta, ply) {
+  try {
+    if ((nodes & 255) === 0 && Date.now() - tStart > tLimit) return 0;
+    nodes++;
+
+    if (depth <= 0) return quiesce(g, alpha, beta);
+    if (g.isGameOver()) return evaluatePosition(g);
+
+    const moves = getMarseillaisMoves(g, false);
+    if (!moves.length) return evaluatePosition(g);
+
+    // Limit branching at deeper plies to speed up
+    const moveLimit = depth >= 3 ? Math.min(12, moves.length) : moves.length;
+    moves.sort((a, b) => scoreMovePair(b, ply, null) - scoreMovePair(a, ply, null));
+
+    let bestScore = -INF;
+    for (let i = 0; i < moveLimit; i++) {
+      const pair = moves[i];
+      const nextFen = applyPairToFen(g.fen(), pair);
+      if (!nextFen) continue;
+
+      const nextG = new Chess(nextFen);
+      const score = -alphabeta(nextG, depth - 1, -beta, -alpha, ply + 1);
+      if (score > bestScore) bestScore = score;
+      if (score > alpha) alpha = score;
+      if (alpha >= beta) break;
+    }
+
+    return bestScore;
+  } catch (err) {
+    console.error('[WORKER] alphabeta error at depth', depth, ':', err);
+    return 0;
+  }
+}
+
+function findBestMove(fen, skillLevel) {
+  const g = new Chess(fen);
+  console.log(`[WORKER] SEARCH START. Skill: ${skillLevel}`);
+  
+  nodes = 0;
+  qNodes = 0;
+  tStart = Date.now();
+  killerMoves.clear();
+  
+  const timeMap = [800, 2000, 4000];
+  tLimit = timeMap[skillLevel - 1] || 2000;
+
+  // Get all legal move pairs once
+  const allRootMoves = getMarseillaisMoves(g, false);
+  console.log(`[WORKER] Generated ${allRootMoves.length} root moves`);
+  if (allRootMoves.length === 0) {
+    console.warn('[WORKER] No root moves generated');
+    return [];
+  }
+
+  // Quick scan for immediate mate-within-turn (pair finishing with checkmate)
+  for (const pair of allRootMoves) {
+    const f = applyPairToFen(fen, pair);
+    if (!f) continue;
+    const tmp = new Chess(f);
+    if (tmp.isCheckmate()) {
+      console.log('[WORKER] Found immediate mate in this turn:', pair.map(m => m.san).join(','));
+      return pair;
+    }
+  }
+
+  // Filter to top moves by static eval only (no validation overhead)
+  allRootMoves.sort((a, b) => scoreMovePair(b, 0, null) - scoreMovePair(a, 0, null));
+  const topK = skillLevel === 1 ? 8 : skillLevel === 2 ? 16 : 32;
+  const rootMoves = allRootMoves.slice(0, Math.min(topK, allRootMoves.length));
+  console.log(`[WORKER] Keeping top ${rootMoves.length} moves for search`);
+
+  let bestMove = null;
+  let bestScore = -INF;
+  
+  const maxDepth = skillLevel === 1 ? 2 : skillLevel === 2 ? 3 : 4;
+
+  for (let d = 1; d <= maxDepth; d++) {
+    if (Date.now() - tStart > tLimit * 0.85) {
+      console.log(`[WORKER] Time limit reached at depth ${d}`);
+      break;
     }
     
-    tStart = Date.now();
-    tLimit = [10,50,100,200,500,1000,2000,4000,6000,8000][level-1] || 500;
-    
-    // Level 1-4: Fast greedy
-    if (level <= 4) {
-      const check = level <= 2 ? moves.slice(0, level === 1 ? 5 : 10) : moves;
-      let best = null, bestSc = -Infinity;
-      for (const pair of check) {
-        if (Date.now() - tStart > tLimit * 0.9) break;
-        const f = applyPair(g, pair);
-        if (g.isCheckmate()) { g.load(f); return pair; }
-        const s = -ev(g);
-        g.load(f);
-        if (s > bestSc) { bestSc = s; best = pair; }
-      }
-      console.log('[WORKER ENGINE] greedy result: ' + (best ? best.map(m=>m.san).join('+') : 'none') + ' ' + (Date.now()-tStart) + 'ms');
-      return best || moves[0];
-    }
-    
-    // Level 5+: Search with iterative deepening
-    const maxDepth = level <= 5 ? 3 : (level <= 7 ? 4 : (level <= 8 ? 5 : 7));
-    console.log('[WORKER ENGINE] iterative deepening to depth ' + maxDepth);
-    
-    moves.sort((a,b) => sc(b) - sc(a));
-    
-    // CRITICAL: Check for immediate mates first
-    console.log('[WORKER ENGINE] checking for immediate checkmates...');
-    for (const pair of moves.slice(0, 30)) {
-      const f = applyPair(g, pair);
-      if (g.isCheckmate()) {
-        g.load(f);
-        console.log('[WORKER ENGINE] IMMEDIATE CHECKMATE: ' + pair.map(m=>m.san).join('+'));
-        return pair;
-      }
-      g.load(f);
-    }
-    
-    let bestMove = null;
-    let bestScore = -Infinity;
-    
-    // Iterative deepening - search progressively deeper
-    for (let depth = 1; depth <= maxDepth; depth++) {
-      if (Date.now() - tStart > tLimit * 0.8) {
-        console.log('[WORKER ENGINE] time limit, stopping at depth ' + depth);
+    console.log(`[WORKER] Starting depth ${d}, time: ${Date.now() - tStart}ms`);
+    let localBest = null;
+    let localScore = -INF;
+    let movesEvaluated = 0;
+
+    for (const pair of rootMoves) {
+      if (Date.now() - tStart > tLimit) {
+        console.log(`[WORKER] Time expired during depth ${d}`);
         break;
       }
       
-      console.log('[WORKER ENGINE] searching depth ' + depth);
-      let depthBest = null;
-      let depthBestScore = -Infinity;
-      
-      // Limit moves searched at root based on level
-      const rootLimit = level <= 6 ? 20 : (level <= 8 ? 15 : 12);
-      const caps = moves.filter(p => p.some(m => m.captured));
-      const quiet = moves.filter(p => !p.some(m => m.captured));
-      const toSearch = [...caps.slice(0, 12), ...quiet.slice(0, Math.max(0, rootLimit - Math.min(12, caps.length)))];
-      
-      for (let i = 0; i < toSearch.length; i++) {
-        if (Date.now() - tStart > tLimit * 0.85) break;
-        
-        const pair = toSearch[i];
-        const f = applyPair(g, pair);
-        
-        // Check for immediate mate
-        if (g.isCheckmate()) {
-          g.load(f);
-          console.log('[WORKER ENGINE] MATE IN ONE: ' + pair.map(m=>m.san).join('+'));
-          return pair;
-        }
-        
-        // CRITICAL: After applying our moves, it's opponent's turn
-        // We negate because we want to evaluate from opponent's perspective, then flip back
-        const s = -search(g, depth - 1, -Infinity, Infinity, false);
-        g.load(f);
-        
-        console.log('[WORKER ENGINE] depth ' + depth + ': ' + pair.map(m=>m.san).join('+') + ' = ' + s);
-        
-        // If we found a forced mate, return immediately
-        if (s >= MATE - 100) {
-          console.log('[WORKER ENGINE] FORCED MATE: ' + pair.map(m=>m.san).join('+') + ' score=' + s);
-          return pair;
-        }
-        
-        if (s > depthBestScore) {
-          depthBestScore = s;
-          depthBest = pair;
-        }
+      const nextFen = applyPairToFen(fen, pair);
+      if (!nextFen) {
+        console.warn(`[WORKER] Invalid move pair: ${pair.map(m => m?.san || '?').join(',')}`);
+        continue;
       }
-      
-      if (depthBest) {
-        bestMove = depthBest;
-        bestScore = depthBestScore;
-        console.log('[WORKER ENGINE] depth ' + depth + ' complete: ' + bestMove.map(m=>m.san).join('+') + ' score=' + bestScore);
+
+      try {
+        console.log(`[WORKER] Evaluating move ${movesEvaluated + 1}: ${pair.map(m => m.san).join(',')}`);
+        const nextG = new Chess(nextFen);
+        const score = -alphabeta(nextG, d - 1, -INF, INF, 1);
+        movesEvaluated++;
+        console.log(`[WORKER] Move scored: ${pair.map(m => m.san).join(',')} = ${score}`);
+
+        if (score > localScore) {
+          localScore = score;
+          localBest = pair;
+          console.log(`[WORKER] Depth ${d}: New best = ${pair.map(m => m.san).join(',')} score=${score}`);
+        }
+      } catch (err) {
+        console.error(`[WORKER] Error evaluating move ${pair.map(m => m?.san || '?').join(',')}: ${err.message}`);
+      }
+    }
+
+    console.log(`[WORKER] Depth ${d} evaluated ${movesEvaluated} moves in ${Date.now() - tStart}ms`);
+
+    if (localBest) {
+      bestMove = localBest;
+      bestScore = localScore;
+      // Re-order for next depth
+      const idx = rootMoves.indexOf(localBest);
+      if (idx > 0) {
+        rootMoves.splice(idx, 1);
+        rootMoves.unshift(localBest);
       }
     }
     
-    console.log('[WORKER ENGINE] FINAL: ' + (bestMove ? bestMove.map(m=>m.san).join('+') : 'none') + ' score=' + bestScore + ' time=' + (Date.now()-tStart) + 'ms');
-    return bestMove || moves[0];
-  } catch (err) {
-    console.error('[WORKER ENGINE] ERROR:', err);
-    throw err;
+    if (Math.abs(bestScore) >= MATE - 100) {
+      console.log(`[WORKER] Mate found, stopping`);
+      break;
+    }
   }
+
+  if (!bestMove && rootMoves.length > 0) {
+    console.warn('[WORKER] No best move found, using first root move');
+    bestMove = rootMoves[0];
+  }
+  
+  console.log(`[WORKER] Returning best move: ${bestMove ? bestMove.map(m => m.san).join(',') : 'null'}`);
+  return bestMove || [];
 }
 
-console.log('[marseillais.worker] engine ready');
-
-self.onmessage = (e) => {
+self.onmessage = e => {
   const { type, fen, skillLevel, requestId } = e.data;
-  console.log('[marseillais.worker] onmessage', { type, requestId, skillLevel });
-
+  console.log('[WORKER] Received message:', { type, skillLevel, requestId });
+  
   if (type === 'findBestMove') {
     try {
-      const level = skillLevel || 5;
-      const best = findBestMove(fen, level);
-      const simple = best?.map(m => ({ from: m.from, to: m.to, promotion: m.promotion, san: m.san, lan: m.lan })) || [];
+      const best = findBestMove(fen, skillLevel || 2);
+      
+      if (!best || best.length === 0) {
+        console.warn('[WORKER] No best move found');
+        self.postMessage({ type: 'bestMove', move: [], requestId });
+        return;
+      }
+      
+      console.log('[WORKER] Best move found:', best);
+      
+      const simple = best.map(m => ({ 
+        from: m.from, 
+        to: m.to, 
+        promotion: m.promotion,
+        san: m.san,
+        lan: m.lan
+      }));
+      
+      console.log('[WORKER] Posting response:', { type: 'bestMove', move: simple, requestId });
       self.postMessage({ type: 'bestMove', move: simple, requestId });
     } catch (err) {
-      console.error('[marseillais.worker] error', err);
+      console.error('[WORKER] Error:', err);
       self.postMessage({ type: 'error', error: String(err), requestId });
     }
   }
