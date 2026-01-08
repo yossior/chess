@@ -28,8 +28,8 @@ function registerSocketHandlers(io, socket) {
     handleFindGame(io, socket, userId);
   });
 
-  socket.on("joinGame", ({ gameId, userId, timeMinutes, incrementSeconds, playerColor, isUnbalanced, sessionId } = {}) => {
-    handleJoinGame(io, socket, gameId, userId, timeMinutes, incrementSeconds, playerColor, isUnbalanced, sessionId);
+  socket.on("joinGame", async ({ gameId, userId, timeMinutes, incrementSeconds, playerColor } = {}) => {
+    await handleJoinGame(io, socket, gameId, userId, timeMinutes, incrementSeconds, playerColor);
   });
 
   // Game moves
@@ -62,7 +62,12 @@ function handleFindGame(io, socket, userId = null) {
   
   if (isNew) {
     // New game created, waiting for opponent
-    socket.emit("waitingForOpponent", { gameId: game.id });
+    socket.emit("waitingForOpponent", { 
+      gameId: game.id,
+      whiteMs: game.whiteMs,
+      blackMs: game.blackMs,
+      incrementMs: game.incrementMs
+    });
     console.log(`[Game] ${socket.id} created game ${game.id}`);
   } else {
     // Joined existing game, notify both players
@@ -101,69 +106,59 @@ function handleFindGame(io, socket, userId = null) {
 /**
  * Handle joining a specific game
  */
-async function handleJoinGame(io, socket, gameId, userId = null, timeMinutes = null, incrementSeconds = null, playerColor = null, isUnbalanced = true, sessionId = null) {
+async function handleJoinGame(io, socket, gameId, userId = null, timeMinutes = null, incrementSeconds = null, playerColor = null) {
   const effectiveUserId = userId ?? socket.data.userId ?? socket.handshake.auth?.userId ?? null;
   if (effectiveUserId) socket.data.userId = effectiveUserId;
-  
-  // For guest users, use sessionId from client or socket.handshake.auth
-  const effectiveSessionId = sessionId ?? socket.handshake.auth?.sessionId ?? socket.data.sessionId;
-  if (effectiveSessionId) {
-    socket.data.sessionId = effectiveSessionId;
+
+  // After a server restart, games may only exist in MongoDB.
+  // Hydrate them before joinGame() falls back to creating a new in-memory game.
+  if (gameId && !gameService.getGame(gameId)) {
+    try {
+      await gameService.hydrateGameFromDb(gameId);
+    } catch (e) {
+      console.error(`[Game] Failed to hydrate game ${gameId}:`, e);
+    }
   }
 
-  let result = gameService.joinGame(socket.id, effectiveUserId, gameId, timeMinutes, incrementSeconds, playerColor, isUnbalanced, effectiveSessionId);
+  const result = gameService.joinGame(socket.id, effectiveUserId, gameId, timeMinutes, incrementSeconds, playerColor);
   
-  // If game not found in memory, try to load from database
   if (!result || !result.game) {
-    try {
-      const dbGame = await gameService.getCompletedGameFromDb(gameId);
-      if (dbGame) {
-        // Game found in DB - send as completed spectator view
-        socket.join(gameId);
-        socket.emit("spectatorJoined", {
-          gameId: gameId,
-          fen: dbGame.fen,
-          turn: dbGame.fen.split(' ')[1],
-          whiteMs: dbGame.whiteMs || 0,
-          blackMs: dbGame.blackMs || 0,
-          serverTime: Date.now(),
-          history: dbGame.moves.map((san, idx) => ({ san, fen: null })), // History without FENs
-          isCompleted: true,
-          movesInTurn: 0,
-          gameResult: dbGame.result,
-          winner: dbGame.winner,
-        });
-        console.log(`[Game] ${socket.id} viewing completed game ${gameId} from DB`);
-        return;
-      }
-    } catch (err) {
-      console.error(`[Game] Error loading game ${gameId} from DB:`, err);
-    }
-    
-    socket.emit("error", "Game not found");
+    socket.emit("error", "Cannot join game");
     return;
   }
 
   const { game, role, reconnected } = result;
 
-  // Join socket to the room - THIS IS CRITICAL
+  // Join socket to the room
   socket.join(gameId);
-  console.log(`[Socket] ${socket.id} joined room ${gameId}`);
   
   // If player reconnected, send them current game state
   if (reconnected) {
     const player = game.players.find(p => p.socketId === socket.id);
+    
+    // Calculate elapsed time since last move for the active player to sync clocks
+    const now = Date.now();
+    let adjustedWhiteMs = game.whiteMs;
+    let adjustedBlackMs = game.blackMs;
+    
+    if (game.lastMoveTime && !game.isCompleted) {
+      const elapsed = now - game.lastMoveTime;
+      const turn = game.chess.turn();
+      if (turn === 'w') adjustedWhiteMs = Math.max(0, game.whiteMs - elapsed);
+      else adjustedBlackMs = Math.max(0, game.blackMs - elapsed);
+    }
+
     socket.emit("gameStarted", {
       gameId: game.id,
       color: player.color,
       fen: game.chess.fen(),
       turn: game.chess.turn(),
-      whiteMs: game.whiteMs,
-      blackMs: game.blackMs,
-      serverTime: Date.now(),
+      whiteMs: adjustedWhiteMs,
+      blackMs: adjustedBlackMs,
+      incrementMs: game.incrementMs,
+      serverTime: now,
       history: game.historyMoves,
       movesInTurn: game.movesInTurn,
-      isUnbalanced: game.isUnbalanced,
     });
     console.log(`[Game] ${socket.id} reconnected to game ${gameId} as ${player.color}`);
     return;
@@ -171,20 +166,39 @@ async function handleJoinGame(io, socket, gameId, userId = null, timeMinutes = n
   
   // If joining as spectator
   if (role === 'spectator') {
-    // Send current game state to spectator
+    // Calculate elapsed time since last move for the active player
+    const now = Date.now();
+    let adjustedWhiteMs = game.whiteMs;
+    let adjustedBlackMs = game.blackMs;
+    
+    if (game.lastMoveTime && !game.isCompleted) {
+      const elapsed = now - game.lastMoveTime;
+      const activePlayer = game.chess.turn();
+      
+      if (activePlayer === 'w') {
+        adjustedWhiteMs = Math.max(0, game.whiteMs - elapsed);
+      } else if (activePlayer === 'b') {
+        adjustedBlackMs = Math.max(0, game.blackMs - elapsed);
+      }
+    }
+    
+    // Send current game state to spectator with adjusted clock times
     socket.emit("spectatorJoined", {
       gameId: game.id,
       fen: game.chess.fen(),
       turn: game.chess.turn(),
-      whiteMs: game.whiteMs,
-      blackMs: game.blackMs,
-      serverTime: Date.now(),
+      whiteMs: adjustedWhiteMs,
+      blackMs: adjustedBlackMs,
+      incrementMs: game.incrementMs,
+      serverTime: now,
       history: game.historyMoves,
       isCompleted: game.isCompleted,
       movesInTurn: game.movesInTurn,
       gameResult: game.gameResult,
       winner: game.winner,
-      isUnbalanced: game.isUnbalanced,
+      whitePlayer: game.players.find(p => p.color === 'w')?.username || 'White',
+      blackPlayer: game.players.find(p => p.color === 'b')?.username || 'Black',
+      isUnbalanced: game.isUnbalanced
     });
     console.log(`[Game] ${socket.id} joined game ${gameId} as spectator`);
     return;
@@ -192,45 +206,51 @@ async function handleJoinGame(io, socket, gameId, userId = null, timeMinutes = n
   
   // If only one player (game just created), wait for opponent
   if (game.players.length === 1) {
-    socket.emit("waitingForOpponent", { gameId: game.id });
-    console.log(`[Game] ${socket.id} created/joined game ${gameId}, waiting for opponent`);
+    // Find the player who just joined (it's the current socket)
+    const currentPlayer = game.players.find(p => p.socketId === socket.id);
+    socket.emit("waitingForOpponent", { 
+      gameId: game.id,
+      color: currentPlayer?.color,
+      whiteMs: game.whiteMs,
+      blackMs: game.blackMs,
+      incrementMs: game.incrementMs
+    });
+    console.log(`[Game] ${socket.id} created/joined game ${gameId} as ${currentPlayer?.color}, waiting for opponent`);
     return;
   }
   
-  // Two players - start the game for BOTH players
+  // Two players - start the game
   const white = game.players.find((p) => p.color === "w");
   const black = game.players.find((p) => p.color === "b");
 
-  console.log(`[Game] Game ${gameId} ready to start with ${white?.socketId} (white) vs ${black?.socketId} (black)`);
-
-  // Use io.to(gameId) to broadcast to the entire room
-  const gameStartData = {
-    gameId: game.id,
-    fen: game.chess.fen(),
-    turn: game.chess.turn(),
-    whiteMs: game.whiteMs,
-    blackMs: game.blackMs,
-    serverTime: Date.now(),
-  };
-
-  // Send to each player with their specific color
+  // Notify both players individually with their color
   if (white?.socketId) {
     io.to(white.socketId).emit("gameStarted", {
-      ...gameStartData,
-      isUnbalanced: game.isUnbalanced,
+      gameId: game.id,
+      color: "w",
+      fen: game.chess.fen(),
+      turn: game.chess.turn(),
+      whiteMs: game.whiteMs,
+      blackMs: game.blackMs,
+      incrementMs: game.incrementMs,
+      serverTime: Date.now(),
     });
   }
 
   if (black?.socketId) {
     io.to(black.socketId).emit("gameStarted", {
-      ...gameStartData,
+      gameId: game.id,
       color: "b",
-      isUnbalanced: game.isUnbalancedrtData,
-      color: "b",
+      fen: game.chess.fen(),
+      turn: game.chess.turn(),
+      whiteMs: game.whiteMs,
+      blackMs: game.blackMs,
+      incrementMs: game.incrementMs,
+      serverTime: Date.now(),
     });
   }
 
-  console.log(`[Game] Game ${gameId} started - emitted gameStarted to both players`);
+  console.log(`[Game] Game ${gameId} started with ${white?.socketId} (white) vs ${black?.socketId} (black)`);
 }
 
 /**
@@ -244,13 +264,7 @@ function handleMove(io, socket, gameId, move) {
     return;
   }
 
-  console.log(`[Move] Game ${gameId}: ${result.move.san} by ${socket.id}`);
-  
-  // Debug: log room membership
-  const room = io.sockets.adapter.rooms.get(gameId);
-  console.log(`[Move] Room ${gameId} has ${room ? room.size : 0} members: ${room ? Array.from(room) : []}`);
-
-  // Broadcast move to ALL clients in the game room (including the sender)
+  // Broadcast move to both players
   io.to(gameId).emit("moveMade", {
     move: result.move,
     fen: result.fen,
@@ -261,7 +275,7 @@ function handleMove(io, socket, gameId, move) {
     serverTime: result.serverTime,
   });
 
-  console.log(`[Move] Game ${gameId}: Broadcasted moveMade event to room`);
+  console.log(`[Move] Game ${gameId}: ${result.move.san}`);
 
   // Check if game is over
   const gameOverReason = gameService.isGameOver(gameId);
