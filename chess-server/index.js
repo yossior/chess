@@ -15,12 +15,7 @@ const { initializeAdminUser } = require("./controllers/user.controller");
 // ============================================
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { 
-  cors: { origin: "*" },
-  transports: ['websocket', 'polling'],
-  pingTimeout: 60000,
-  pingInterval: 25000,
-});
+const io = new Server(server, { cors: { origin: "*" } });
 
 // ============================================
 // MIDDLEWARE
@@ -90,16 +85,18 @@ function startServer() {
 // ============================================
 process.on("SIGINT", () => {
   console.log("\n🛑 Shutting down gracefully...");
-  server.close(async () => {
+  server.close(() => {
     console.log("✅ Server closed");
-    try {
-      await mongoose.connection.close(false);
-      console.log("✅ MongoDB disconnected");
-      process.exit(0);
-    } catch (err) {
-      console.error("❌ Error disconnecting MongoDB during shutdown:", err);
-      process.exit(1);
-    }
+    Promise.resolve()
+      .then(() => mongoose.connection.close(false))
+      .then(() => {
+        console.log("✅ MongoDB disconnected");
+        process.exit(0);
+      })
+      .catch((err) => {
+        console.error("❌ Error closing MongoDB connection:", err?.message || err);
+        process.exit(1);
+      });
   });
 });
 

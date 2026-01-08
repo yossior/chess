@@ -89,21 +89,10 @@ export default function useClock(initialTime = 300) {
     }, [activePlayer, isActive]);
 
     const start = useCallback((side = "w") => {
-        // Normalize 'white'/'black' to 'w'/'b'
-        let normalizedSide = side;
-        if (side === "white") normalizedSide = "w";
-        else if (side === "black") normalizedSide = "b";
-        
-        if (normalizedSide !== "w" && normalizedSide !== "b" && normalizedSide !== null) return;
-        
-        // Only restart if the active player actually changed
-        if (clockStateRef.current.activePlayer === normalizedSide && clockStateRef.current.isActive) {
-            return;
-        }
-        
+        if (side !== "w" && side !== "b" && side !== null) return;
         clockStateRef.current.lastUpdateTime = Date.now();
         setIsActive(true);
-        setActivePlayer(normalizedSide);
+        setActivePlayer(side);
     }, []);
 
     const pause = useCallback(() => {
@@ -115,11 +104,11 @@ export default function useClock(initialTime = 300) {
         clockStateRef.current.isActive = false;
     }, []);
 
-    const reset = useCallback(({ initialSeconds = initialTime } = {}) => {
+    const reset = useCallback(() => {
         if (animationFrameRef.current) {
             cancelAnimationFrame(animationFrameRef.current);
         }
-        const resetTime = initialSeconds * 1000;
+        const resetTime = initialTime * 1000;
         setWhiteMs(resetTime);
         setBlackMs(resetTime);
         clockStateRef.current.whiteMs = resetTime;
@@ -133,37 +122,23 @@ export default function useClock(initialTime = 300) {
     /**
      * Synchronize clock times from server (for online play)
      * This ensures both players' clocks match the server state
+     * @param serverTime - optional timestamp from server when values were calculated
      */
     const syncFromServer = useCallback((serverWhiteMs, serverBlackMs, activePlayerColor, opts = {}) => {
-        const { startClock = false } = opts;
+        const { startClock = false, serverTime = Date.now() } = opts;
 
         // Update both state and ref for accurate tracking
         setWhiteMs(serverWhiteMs);
         setBlackMs(serverBlackMs);
         clockStateRef.current.whiteMs = serverWhiteMs;
         clockStateRef.current.blackMs = serverBlackMs;
-        clockStateRef.current.lastUpdateTime = Date.now();
+        clockStateRef.current.lastUpdateTime = serverTime;
 
         if (startClock && activePlayerColor) {
             const player = activePlayerColor === "w" ? "w" : "b";
             clockStateRef.current.activePlayer = player;
             setActivePlayer(player);
             setIsActive(true);
-        }
-    }, []);
-
-    // Add increment to a player's clock (used when turn completes)
-    const applyIncrement = useCallback((side, incrementSeconds = 2) => {
-        const incrementMs = incrementSeconds * 1000;
-        console.log('[useClock] applyIncrement', { side, incrementSeconds });
-        if (side === "white") {
-            clockStateRef.current.whiteMs = Math.max(0, clockStateRef.current.whiteMs + incrementMs);
-            setWhiteMs(clockStateRef.current.whiteMs);
-            console.log('[useClock] whiteMs now', clockStateRef.current.whiteMs);
-        } else if (side === "black") {
-            clockStateRef.current.blackMs = Math.max(0, clockStateRef.current.blackMs + incrementMs);
-            setBlackMs(clockStateRef.current.blackMs);
-            console.log('[useClock] blackMs now', clockStateRef.current.blackMs);
         }
     }, []);
 
@@ -178,7 +153,6 @@ export default function useClock(initialTime = 300) {
         status,
         isTimeout,
         reset,
-        syncFromServer,
-        applyIncrement
+        syncFromServer
     };
 }

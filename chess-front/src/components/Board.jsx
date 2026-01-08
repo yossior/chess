@@ -7,6 +7,10 @@ export default function Board({ chess, mode = "local", opponent, clock, viewInde
   const [showAnimations, setShowAnimations] = useState(true);
   const isFriend = mode === "friend";
   const isSpectator = isFriend && opponent?.isSpectator;
+  
+  // In friend mode, check if opponent is waiting - if so, game hasn't truly started yet
+  const isGameReady = isFriend ? !opponent?.waiting : gameStarted;
+  
   const myColor = chess.playerColor ?? "w"; 
   // Spectators always see from white's perspective
   const baseOrientation = isSpectator ? "white" : (isFriend ? (myColor === "w" ? "white" : "black") : (myColor === "w" ? "white" : "black"));
@@ -172,8 +176,8 @@ export default function Board({ chess, mode = "local", opponent, clock, viewInde
   }
 
   function canDragPiece({ piece }) {
-    // Cannot drag if game not started
-    if (!gameStarted) return false;
+    // Cannot drag if game not ready (waiting for opponent in friend mode)
+    if (!isGameReady) return false;
     
     // Spectators cannot drag pieces
     if (isSpectator) return false;
@@ -199,8 +203,8 @@ export default function Board({ chess, mode = "local", opponent, clock, viewInde
   }
 
   function onSquareClick({ square, piece }) {
-    // Cannot click if game not started
-    if (!gameStarted) return;
+    // Cannot click if game not ready (waiting for opponent in friend mode)
+    if (!isGameReady) return;
     
     // Spectators cannot click squares
     if (isSpectator) return;

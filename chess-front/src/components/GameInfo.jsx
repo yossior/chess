@@ -1,17 +1,22 @@
 /**
  * Modern game info panel with visual design
  */
-export default function GameInfo({ mode, gameStatus, isMyTurn, turn, movesInTurn, isUnbalanced, playerColor, onResign, waiting, isSpectator, onCopyLink, winnerInfo }) {
-  const turnColor = turn === "w" ? "White" : "Black";
-  const playerColorName = playerColor === "w" ? "White" : "Black";
+export default function GameInfo({ mode, gameStatus, isMyTurn, turn, movesInTurn, isUnbalanced, playerColor, onResign, waiting, isSpectator, onCopyLink, winnerInfo, moveHistory, opponentNames }) {
+  const turnColor = turn === "w" ? (opponentNames?.white || "White") : (opponentNames?.black || "Black");
+  const playerColorName = playerColor === "w" ? (opponentNames?.white || "White") : (opponentNames?.black || "Black");
   
   return (
     <div className="bg-slate-800/90 backdrop-blur-xl rounded-2xl shadow-xl p-3 md:p-4 space-y-3 border border-slate-700/50 overflow-hidden">
       {/* Spectator Badge */}
       {isSpectator && (
-        <div className="bg-indigo-500/20 border border-indigo-500/40 rounded-xl p-3 backdrop-blur-sm">
+        <div className="bg-indigo-500/20 border border-indigo-500/40 rounded-xl p-3 backdrop-blur-sm space-y-2">
           <div className="text-indigo-300 font-semibold text-center flex items-center justify-center gap-2 text-sm">
             👁️ Spectating
+          </div>
+          <div className="flex justify-between items-center text-xs text-indigo-200">
+            <span className="flex items-center gap-1">⚪ {opponentNames?.white || 'White'}</span>
+            <span className="text-indigo-500 font-bold">VS</span>
+            <span className="flex items-center gap-1">⚫ {opponentNames?.black || 'Black'}</span>
           </div>
         </div>
       )}
@@ -110,7 +115,7 @@ export default function GameInfo({ mode, gameStatus, isMyTurn, turn, movesInTurn
       {mode && !gameStatus && !isSpectator && (
         <button
           onClick={onResign}
-          disabled={winnerInfo || (mode === 'friend' && waiting)}
+          disabled={winnerInfo || (mode === 'friend' && waiting) || !moveHistory || moveHistory.length === 0}
           className="w-full mt-2 py-2 px-4 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 disabled:from-slate-600 disabled:to-slate-700 disabled:cursor-not-allowed disabled:opacity-50 text-white font-semibold text-sm rounded-lg transition-all shadow-lg border border-red-500/30 disabled:border-slate-600"
         >
           🏳️ Resign

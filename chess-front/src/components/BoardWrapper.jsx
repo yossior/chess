@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react"; // Import hooks
+import { useEffect, useState, useCallback, useRef } from "react"; // Import hooks
 
 import Controls from "./Controls";
 import Board from "./Board";
@@ -17,6 +17,8 @@ import MoveHistory from "./MoveHistory";
 import { useUser } from "../context/UserContext";
 
 export default function BoardWrapper() {
+    // Track which game ID we've already attempted to join
+    const joinAttemptedRef = useRef(null);
     const [mode, setMode] = useState("local"); // Start with local mode enabled
     const [showPlayFriend, setShowPlayFriend] = useState(false);
     const [showPlayBot, setShowPlayBot] = useState(false);
@@ -26,15 +28,15 @@ export default function BoardWrapper() {
     const [skillLevel, setSkillLevel] = useState(2); // Default to Normal (level 2)
     const [playerColor, setPlayerColor] = useState("w"); // Default to White
     const [isUnbalanced, setIsUnbalanced] = useState(true); // Default to Unbalanced
-    const [pendingGameId, setPendingGameId] = useState(null); // Track game ID from URL
-    const [pendingCreateSettings, setPendingCreateSettings] = useState(null); // Track creator settings if socket not ready
+    const [pendingGameId, setPendingGameId] = useState(null); // Track game ID from URL or creation
+    const [pendingGameSettings, setPendingGameSettings] = useState(null); // Track game settings (time, color, etc)
     const [flipBoard, setFlipBoard] = useState(false);
     const [gameOverInfo, setGameOverInfo] = useState(null);
-    const [gameStarted, setGameStarted] = useState(true); // Game enabled by default
+    const [gameStarted, setGameStarted] = useState(false); // Game only enabled after explicit start or mode change
     const [isBotGameTimed, setIsBotGameTimed] = useState(false);
     const [botTimeMinutes, setBotTimeMinutes] = useState(3);
     const [botIncrementSeconds, setBotIncrementSeconds] = useState(2);
-    const { user } = useUser();
+    const { user, loading } = useUser();
     const { toast, showToast } = useToast();
 
     // The state controlling which move is shown (null = Live)
@@ -57,70 +59,215 @@ export default function BoardWrapper() {
         (payload) => {
             setGameOverInfo(payload);
             clock.pause?.();
-        }
+        },
+        setIsUnbalanced
     );
 
-    // Check URL for game ID on mount
+    // Check URL for game ID on mount and restore active games
     useEffect(() => {
-        // Check for /game/ID format
-        const pathMatch = window.location.pathname.match(/^\/game\/([a-z0-9]+)$/);
-        const gameId = pathMatch ? pathMatch[1] : null;
+        console.log('[BoardWrapper] Mount effect running');
         
-        if (gameId) {
-            // Joining via shared link - check if we have stored player info for this game
-            const storedInfo = localStorage.getItem(`chess_game_${gameId}`);
-            let playerInfo = null;
-            
-            if (storedInfo) {
-                try {
-                    playerInfo = JSON.parse(storedInfo);
-                    console.log('[BoardWrapper] Found stored player info for reconnection:', playerInfo);
-                } catch (e) {
-                    console.error('Failed to parse stored game info', e);
-                }
+        // First priority: check if there's an active friend game in progress (for refresh recovery)
+        const activeGame = localStorage.getItem('chess_active_game');
+        
+        if (activeGame) {
+            // Resume active game - this takes priority over URL
+            try {
+                const gameInfo = JSON.parse(activeGame);
+                console.log('[BoardWrapper] Restoring active friend game:', gameInfo);
+                setMode('friend');
+                setShowPlayFriend(false);
+                // For resumed games, use pendingGameId so server can use stored color for reconnection matching
+                setPendingGameId(gameInfo.gameId);
+                setGameStarted(true);
+            } catch (e) {
+                console.error('Failed to parse active game info', e);
+                localStorage.removeItem('chess_active_game');
             }
+        } else {
+            // Check for /game/ID format (joining via shared link, not an active game)
+            const pathMatch = window.location.pathname.match(/^\/game\/([a-z0-9]+)$/);
+            const gameId = pathMatch ? pathMatch[1] : null;
             
-            setMode('friend');
-            setShowPlayFriend(false);
-            setPendingGameId(gameId);
-            setGameStarted(true);
-            
-            // If we have player info, restore it for reconnection
-            if (playerInfo) {
-                setPendingCreateSettings({
-                    gameId,
-                    timeMinutes: playerInfo.timeMinutes || 3,
-                    incrementSeconds: playerInfo.incrementSeconds || 2,
-                    color: playerInfo.color || 'w',
-                    isUnbalanced: playerInfo.isUnbalanced !== undefined ? playerInfo.isUnbalanced : true
-                });
+            if (gameId) {
+                console.log('[BoardWrapper] Found game ID in URL:', gameId);
+                // Joining via shared link (not resuming active game)
+                setMode('friend');
+                setShowPlayFriend(false);
+                setPendingGameId(gameId);
+                setGameStarted(true);
+            } else {
+                // Check if there's an active bot game in progress (for refresh recovery)
+                const activeBotGame = localStorage.getItem('chess_active_bot_game');
+                console.log('[BoardWrapper] Checking for active bot game:', activeBotGame ? 'Found' : 'Not found');
+                
+                if (activeBotGame) {
+                    try {
+                        const botGameInfo = JSON.parse(activeBotGame);
+                        console.log('[BoardWrapper] Parsed bot game info:', {
+                            skillLevel: botGameInfo.skillLevel,
+                            isUnbalanced: botGameInfo.isUnbalanced,
+                            playerColor: botGameInfo.playerColor,
+                            isTimed: botGameInfo.isTimed,
+                            moveCount: botGameInfo.moveHistory?.length || 0,
+                            fen: botGameInfo.fen
+                        });
+                        setMode('local');
+                        setShowPlayBot(false);
+                        setSkillLevel(botGameInfo.skillLevel || 2);
+                        setIsUnbalanced(botGameInfo.isUnbalanced !== false); // Default to true
+                        setIsBotGameTimed(botGameInfo.isTimed || false);
+                        setBotTimeMinutes(botGameInfo.timeMinutes || 3);
+                        setBotIncrementSeconds(botGameInfo.incrementSeconds || 2);
+                        setPlayerColor(botGameInfo.playerColor || 'w');
+                        
+                        // Store these for restoration after chess is initialized
+                        setPendingGameSettings({
+                            isBotGame: true,
+                            fen: botGameInfo.fen,
+                            moveHistory: botGameInfo.moveHistory || [],
+                            movesInTurn: botGameInfo.movesInTurn || 0,
+                            whiteMs: botGameInfo.whiteMs,
+                            blackMs: botGameInfo.blackMs,
+                        });
+                        
+                        setGameStarted(true);
+                        console.log('[BoardWrapper] Bot game settings prepared for restoration');
+                    } catch (e) {
+                        console.error('Failed to parse active bot game info', e);
+                        localStorage.removeItem('chess_active_bot_game');
+                    }
+                } else {
+                    console.log('[BoardWrapper] No active game to restore');
+                }
             }
         }
     }, []);
 
     // Join game when online connection is ready and we have a pending game ID
+    // Also restore bot games from localStorage
     useEffect(() => {
-        if (pendingGameId && online?.isConnected && !pendingCreateSettings) {
-            // Simple rejoin without stored settings (e.g., from sharing link for first time)
-            online.joinSpecificGame(pendingGameId, user?.id);
-            setPendingGameId(null);
+        console.log('[BoardWrapper] Join effect - pendingGameId:', pendingGameId, 'pendingGameSettings:', pendingGameSettings?.gameId, 'connected:', online?.isConnected, 'loading:', loading);
+        
+        // Wait for user to finish loading before attempting to join
+        if (loading) {
+            console.log('[BoardWrapper] Waiting for user to load...');
+            return;
+        }
+        
+        // MAIN PATH: Join an online friend game (either creating new or resuming)
+        if (pendingGameId && online?.isConnected) {
+            // Only attempt the join once per game ID
+            if (joinAttemptedRef.current === pendingGameId) {
+                console.log('[BoardWrapper] Already attempted to join game', pendingGameId, ', skipping');
+                return;
+            }
+            
+            joinAttemptedRef.current = pendingGameId;
+            
+            let color = null;
+            let timeMinutes = null;
+            let incrementSeconds = null;
+            
+            // Check if we have settings from the current session (game creation)
+            if (pendingGameSettings) {
+                color = pendingGameSettings.color;
+                timeMinutes = pendingGameSettings.timeMinutes;
+                incrementSeconds = pendingGameSettings.incrementSeconds;
+                console.log('[BoardWrapper] Using pending settings: color=' + color + ', time=' + timeMinutes);
+            } else {
+                // Check if this is a resumed active game (refresh recovery)
+                const activeGameInfo = localStorage.getItem('chess_active_game');
+                try {
+                    const gameInfo = JSON.parse(activeGameInfo || '{}');
+                    if (gameInfo.gameId === pendingGameId) {
+                        color = gameInfo.color;
+                        timeMinutes = gameInfo.timeMinutes;
+                        incrementSeconds = gameInfo.incrementSeconds;
+                    }
+                } catch (e) {
+                    // Ignore parse errors
+                }
+                
+                // Fallback: check stored settings from URL join
+                if (!color) {
+                    const storedSettings = localStorage.getItem(`chess_game_${pendingGameId}`);
+                    try {
+                        const settings = JSON.parse(storedSettings || '{}');
+                        color = settings.color;
+                        timeMinutes = settings.timeMinutes;
+                        incrementSeconds = settings.incrementSeconds;
+                    } catch (e) {
+                        // Ignore parse errors
+                    }
+                }
+            }
+            
+            console.log('[BoardWrapper] Joining game:', pendingGameId, 'color:', color, 'time:', timeMinutes);
+            online.joinSpecificGame(pendingGameId, user?.id, timeMinutes, incrementSeconds, color);
+            // NOTE: Don't clear pendingGameId here - it will be cleared when gameStarted/spectatorJoined is received
+            return;
         }
 
-        if (pendingCreateSettings && online?.isConnected) {
-            online.joinSpecificGame(
-                pendingCreateSettings.gameId,
-                user?.id,
-                pendingCreateSettings.timeMinutes,
-                pendingCreateSettings.incrementSeconds,
-                pendingCreateSettings.color,
-                pendingCreateSettings.isUnbalanced
-            );
-            setPendingGameId(null);
-            setPendingCreateSettings(null);
+        // BOT GAME PATH: Restore bot game from localStorage
+        if (pendingGameSettings?.isBotGame && chess?.chessGame) {
+            console.log('[BoardWrapper] Restoring bot game state...');
+            try {
+                // Load the FEN position
+                console.log('[BoardWrapper] Loading FEN:', pendingGameSettings.fen);
+                chess.chessGame.load(pendingGameSettings.fen);
+                chess.setChessPosition(pendingGameSettings.fen);
+                
+                // Restore move history
+                console.log('[BoardWrapper] Restoring', pendingGameSettings.moveHistory?.length || 0, 'moves');
+                chess.setMoveHistory(pendingGameSettings.moveHistory || []);
+                chess.setHistoryIndex(null);
+                
+                // Restore turn based on FEN (turn is already in the FEN)
+                chess.setTurn(chess.chessGame.turn());
+                
+                // Restore movesInTurn
+                if (chess.setMovesInTurn) {
+                    chess.setMovesInTurn(pendingGameSettings.movesInTurn || 0);
+                }
+                
+                // Restore clock state if timed game
+                if (isBotGameTimed && clock?.syncFromServer && pendingGameSettings.whiteMs !== undefined) {
+                    console.log('[BoardWrapper] Syncing clock for timed game');
+                    clock.syncFromServer(
+                        pendingGameSettings.whiteMs,
+                        pendingGameSettings.blackMs,
+                        chess.chessGame.turn(),
+                        { startClock: true }
+                    );
+                }
+                
+                console.log('[BoardWrapper] Bot game state restored successfully');
+            } catch (e) {
+                console.error('[BoardWrapper] Failed to restore bot game state:', e);
+            }
+            setPendingGameSettings(null);
         }
-    }, [pendingGameId, pendingCreateSettings, online?.isConnected, online, user?.id]);
+    }, [pendingGameId, pendingGameSettings, online?.isConnected, online, user?.id, chess, isBotGameTimed, clock, loading]);
 
-    // Pause/clear clocks when leaving friend mode (unless entering timed local game)
+    // Clear pendingGameId and reset join tracking when the game response is received
+    useEffect(() => {
+        if (pendingGameId && online?.gameId && online?.gameId === pendingGameId) {
+            console.log('[BoardWrapper] Game response received, clearing pending state');
+            setPendingGameId(null);
+            setPendingGameSettings(null);
+            joinAttemptedRef.current = null;
+        }
+    }, [pendingGameId, online?.gameId]);
+
+    // Set gameStarted when entering a game mode
+    useEffect(() => {
+        // Game shows as started in friend mode when we have a game ID (waiting or playing)
+        if (mode === 'friend' && online?.gameId) {
+            console.log('[BoardWrapper] Setting gameStarted=true for friend mode');
+            setGameStarted(true);
+        }
+    }, [mode, online?.gameId]);
     useEffect(() => {
         if (mode !== "friend" && !isBotGameTimed && clock?.pause) {
             clock.pause();
@@ -258,7 +405,7 @@ export default function BoardWrapper() {
         setShowPlayFriend(false);
         setGameOverInfo(null);
         setFlipBoard(false);
-        setGameStarted(true);
+        // Don't set gameStarted=true yet - wait for waitingForOpponent or gameStarted event
         
         // Update URL without time/increment parameters
         window.history.pushState({}, '', `/game/${settings.gameId}`);
@@ -282,12 +429,10 @@ export default function BoardWrapper() {
         setIsUnbalanced(settings.isUnbalanced);
         clock.reset({ initialSeconds: settings.timeMinutes * 60 });
         
-        // Join/create online game with the gameId, passing the desired color and isUnbalanced
-        if (online?.isConnected) {
-            online.joinSpecificGame(settings.gameId, user?.id, settings.timeMinutes, settings.incrementSeconds, settings.color, settings.isUnbalanced);
-        } else {
-            setPendingCreateSettings(settings);
-        }
+        // Set pending settings and game ID - let the join effect handle the actual join
+        // This ensures we wait for socket connection before attempting to join
+        setPendingGameSettings(settings);
+        setPendingGameId(settings.gameId);
     }
 
     const handleOnlineStarted = useCallback(() => {
@@ -301,9 +446,68 @@ export default function BoardWrapper() {
             // In local mode, treat as resignation and set game over
             const winner = chess.turn === 'w' ? 'black' : 'white';
             setGameOverInfo({ reason: 'resignation', winner });
+            clock.pause?.();
+            // Clear bot game from storage when game ends
+            if (typeof window !== 'undefined') {
+                localStorage.removeItem('chess_active_bot_game');
+            }
         }
         // Don't reset - keep the final position visible
     }
+
+    // Save bot game state to localStorage whenever game state changes
+    // Use a ref to debounce saves (don't save on every clock tick)
+    const saveTimeoutRef = useRef(null);
+    useEffect(() => {
+        if (mode !== 'local') return;
+        if (!gameStarted) return;
+        if (!chess?.chessGame) return;
+        
+        // Don't save if game is over (user will start fresh next time)
+        if (gameOverInfo) {
+            if (typeof window !== 'undefined') {
+                localStorage.removeItem('chess_active_bot_game');
+            }
+            return;
+        }
+        
+        // Debounce saves to every 1 second to avoid excessive localStorage writes
+        if (saveTimeoutRef.current) {
+            clearTimeout(saveTimeoutRef.current);
+        }
+        
+        saveTimeoutRef.current = setTimeout(() => {
+            try {
+                console.log('[BoardWrapper] Saving bot game state...');
+                const botGameState = {
+                    skillLevel,
+                    isUnbalanced,
+                    playerColor,
+                    isTimed: isBotGameTimed,
+                    timeMinutes: botTimeMinutes,
+                    incrementSeconds: botIncrementSeconds,
+                    fen: chess.chessGame.fen(),
+                    moveHistory: chess.moveHistory,
+                    movesInTurn: chess.movesInTurn,
+                    whiteMs: clock.whiteMs,
+                    blackMs: clock.blackMs,
+                };
+                
+                if (typeof window !== 'undefined') {
+                    localStorage.setItem('chess_active_bot_game', JSON.stringify(botGameState));
+                    console.log('[BoardWrapper] Bot game saved, moveHistory length:', botGameState.moveHistory.length);
+                }
+            } catch (e) {
+                console.error('[BoardWrapper] Failed to save bot game state:', e);
+            }
+        }, 1000);
+        
+        return () => {
+            if (saveTimeoutRef.current) {
+                clearTimeout(saveTimeoutRef.current);
+            }
+        };
+    }, [mode, gameStarted, chess?.chessGame?.fen(), chess?.moveHistory?.length, chess?.movesInTurn, playerColor, skillLevel, isUnbalanced, isBotGameTimed, botTimeMinutes, botIncrementSeconds, gameOverInfo, clock.whiteMs, clock.blackMs]);;
 
     // Game over modal handler for local checkmates (not emitted via socket)
     useEffect(() => {
@@ -320,8 +524,9 @@ export default function BoardWrapper() {
                 winner = null;
             }
             setGameOverInfo({ reason, winner });
+            clock.pause?.();
         }
-    }, [mode, chess.chessGame, chess.turn, gameOverInfo]);
+    }, [mode, chess.chessGame, chess.turn, gameOverInfo, clock]);
 
     useEffect(() => {
         if (!startFinding) return;
@@ -342,20 +547,8 @@ export default function BoardWrapper() {
         }
     }, [gameOverInfo, mode, clock]);
 
-    // Add beforeunload warning when there's an active game
-    useEffect(() => {
-        const handleBeforeUnload = (e) => {
-            // Only show warning if game is active (not completed)
-            if ((mode === 'friend' || mode === 'ai') && !gameOverInfo) {
-                e.preventDefault();
-                e.returnValue = '';
-                return '';
-            }
-        };
-
-        window.addEventListener('beforeunload', handleBeforeUnload);
-        return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-    }, [mode, gameOverInfo]);
+    // Beforeunload warning is not needed for online games since server preserves state
+    // Removing it completely to avoid unwanted alerts
 
 
 
@@ -473,7 +666,13 @@ export default function BoardWrapper() {
                             setFlipBoard(false);
                             setPlayerColor("w");
                             setIsUnbalanced(true);
+                            setPendingGameId(null);
+                            setPendingGameSettings(null);
                             window.history.pushState({}, '', '/');
+                            if (typeof window !== 'undefined') {
+                                // Clear all localStorage
+                                localStorage.clear();
+                            }
                             chess.resetGame();
                             clock?.pause?.();
                         }}
@@ -530,7 +729,9 @@ export default function BoardWrapper() {
                     onResign={handleResign}
                     waiting={online?.waiting}
                     isSpectator={online?.isSpectator}
+                    opponentNames={online?.opponentNames}
                     winnerInfo={gameOverInfo}
+                    moveHistory={chess.moveHistory}
                     onCopyLink={() => {
                         navigator.clipboard.writeText(window.location.href);
                         showToast('Link copied to clipboard!');
@@ -545,7 +746,10 @@ export default function BoardWrapper() {
                     <div className="lg:hidden w-full">
                         <ClockView 
                             timeMs={getHistoricalClockTime('opponent')} 
-                            label={online?.isSpectator ? "Black" : (chess.playerColor === "w" ? "Black" : "White")} 
+                            label={online?.isSpectator 
+                                ? (chess.playerColor === "w" ? (online?.opponentNames?.black || "Black") : (online?.opponentNames?.white || "White"))
+                                : (chess.playerColor === "w" ? (online?.opponentNames?.black || "Black") : (online?.opponentNames?.white || "White"))
+                            } 
                         />
                     </div>
                 )}
@@ -567,7 +771,10 @@ export default function BoardWrapper() {
                     <div className="lg:hidden w-full">
                         <ClockView 
                             timeMs={getHistoricalClockTime('player')} 
-                            label={online?.isSpectator ? "White" : (chess.playerColor === "w" ? "White" : "Black")} 
+                            label={online?.isSpectator 
+                                ? (chess.playerColor === "w" ? (online?.opponentNames?.white || "White") : (online?.opponentNames?.black || "Black"))
+                                : (chess.playerColor === "w" ? (online?.opponentNames?.white || "White") : (online?.opponentNames?.black || "Black"))
+                            } 
                         />
                     </div>
                 )}
@@ -578,7 +785,10 @@ export default function BoardWrapper() {
                         {/* Opponent/Top clock */}
                         <ClockView 
                             timeMs={getHistoricalClockTime('opponent')} 
-                            label={online?.isSpectator ? "Black" : (chess.playerColor === "w" ? "Black" : "White")} 
+                            label={online?.isSpectator 
+                                ? (chess.playerColor === "w" ? (online?.opponentNames?.black || "Black") : (online?.opponentNames?.white || "White"))
+                                : (chess.playerColor === "w" ? (online?.opponentNames?.black || "Black") : (online?.opponentNames?.white || "White"))
+                            } 
                         />
                         
                         {/* Move History in the middle - fixed height */}
@@ -593,7 +803,10 @@ export default function BoardWrapper() {
                         {/* Player/Bottom clock */}
                         <ClockView 
                             timeMs={getHistoricalClockTime('player')} 
-                            label={online?.isSpectator ? "White" : (chess.playerColor === "w" ? "White" : "Black")} 
+                            label={online?.isSpectator 
+                                ? (chess.playerColor === "w" ? (online?.opponentNames?.white || "White") : (online?.opponentNames?.black || "Black"))
+                                : (chess.playerColor === "w" ? (online?.opponentNames?.white || "White") : (online?.opponentNames?.black || "Black"))
+                            } 
                         />
                     </div>
                 )}
