@@ -3,9 +3,17 @@ services:
     name: chess-app
     env: node
     buildCommand: |
-      npm ci --prefix chess-front 
+      if [ -f chess-front/package-lock.json ]; then \
+        npm ci --prefix chess-front; \
+      else \
+        npm install --prefix chess-front; \
+      fi
       npm run build --prefix chess-front
-      npm ci --omit=dev --prefix chess-server
+      if [ -f chess-server/package-lock.json ]; then \
+        npm ci --prefix chess-server; \
+      else \
+        npm install --prefix chess-server; \
+      fi
     startCommand: npm start
     envVars:
       - key: NODE_ENV
