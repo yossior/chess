@@ -3,6 +3,7 @@ const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
 const mongoose = require("mongoose");
+const path = require("path");
 require("dotenv").config();
 
 const { registerSocketHandlers } = require("./handlers/socket.handler");
@@ -24,10 +25,14 @@ const io = new Server(server, { cors: { origin: "*" } });
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
-app.use(express.static('public'));
 
-// Serve frontend dist folder
-app.use(express.static('chess-front/dist'));
+// Static assets
+app.use(express.static(path.join(__dirname, "public")));
+
+// Serve frontend dist folder regardless of process cwd
+const rootDir = path.resolve(__dirname, "..");
+const distDir = path.join(rootDir, "chess-front", "dist");
+app.use(express.static(distDir));
 
 // ============================================
 // ROUTES
@@ -39,11 +44,9 @@ app.get("/health", (req, res) => {
   res.status(200).json({ status: "ok", timestamp: Date.now() });
 });
 
-// SPA fallback - serve index.html for all non-API routes
-app.get('*', (req, res) => {
-  if (!req.path.startsWith('/api') && !req.path.startsWith('/socket')) {
-    res.sendFile('chess-front/dist/index.html', { root: '.' });
-  }
+// SPA fallback - serve index.html for all non-API routes (Express v5-safe)
+app.get(/^\/(?!api|socket).*/, (req, res) => {
+  res.sendFile(path.join(distDir, 'index.html'));
 });
 
 // Error handling middleware
