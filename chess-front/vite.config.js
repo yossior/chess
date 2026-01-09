@@ -12,11 +12,11 @@ export default defineConfig({
     },
     proxy: {
       '/api': {
-        target: 'http://localhost:80',
+        target: 'http://localhost:443',
         changeOrigin: true,
       },
       '/socket.io': {
-        target: 'ws://localhost:80',
+        target: 'ws://localhost:443',
         ws: true,
       },
     },
