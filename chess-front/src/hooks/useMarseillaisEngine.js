@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
+// Import worker using Vite's worker import syntax - this bundles all dependencies
+import MarseillaisEngineWorker from '../workers/marseillais-engine.worker.js?worker';
 
 const LEVELS = {
   1: { depth: 2, description: 'Easy' },
@@ -33,9 +35,8 @@ export function useMarseillaisEngine(
 
     async function init() {
       try {
-        const workerUrl = new URL('../workers/marseillais-engine.worker.js', import.meta.url);
-        
-        worker = new Worker(workerUrl, { type: 'module' });
+        // Use Vite's worker import which properly bundles all dependencies
+        worker = new MarseillaisEngineWorker();
         workerRef.current = worker;
 
         console.log('[useMarseillaisEngine] Initialized worker');
