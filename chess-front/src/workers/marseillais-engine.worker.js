@@ -7,6 +7,8 @@
  * 
  */
 
+// Import from chess.js package which is symlinked to modified-chess-js via workspaces
+// This gives us Marseillais chess methods: turns(), playTurn(), undoTurn()
 import { Chess } from 'chess.js';
 
 console.log('[marseillais-engine.worker] v8.0 Heuristic Best-Response');
