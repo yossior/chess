@@ -7,7 +7,7 @@
  * 
  */
 
-import { Chess } from '../../../chess.js/src/chess.ts';
+import { Chess } from 'chess.js';
 
 console.log('[marseillais-engine.worker] v8.0 Heuristic Best-Response');
 
