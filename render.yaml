@@ -2,7 +2,7 @@ services:
   - type: web
     name: chess-app
     env: node
-    buildCommand: npm install --prefix chess-front --include=dev && npm run build --prefix chess-front && npm install --prefix chess-server --omit=dev
+    buildCommand: npm install && npm run build --prefix chess-front && npm install --prefix chess-server --omit=dev
     startCommand: npm --prefix chess-server start
     envVars:
       - key: NODE_ENV
