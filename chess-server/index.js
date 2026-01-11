@@ -8,6 +8,7 @@ require("dotenv").config();
 
 const { registerSocketHandlers } = require("./handlers/socket.handler");
 const userRoutes = require("./routes/user.route");
+const statsRoutes = require("./routes/stats.route");
 const { errorHandler } = require("./middleware/auth.middleware");
 // Admin initialization disabled
 // const { initializeAdminUser } = require("./controllers/user.controller");
@@ -45,6 +46,7 @@ app.use(express.static(distDir));
 // ROUTES
 // ============================================
 app.use("/api/users", userRoutes);
+app.use("/api/stats", statsRoutes);
 
 // Health check
 app.get("/health", (req, res) => {

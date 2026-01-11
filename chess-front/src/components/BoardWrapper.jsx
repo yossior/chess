@@ -15,6 +15,7 @@ import ClockView from "./ClockView";
 import useClock from "../hooks/useClock";
 import MoveHistory from "./MoveHistory";
 import { useUser } from "../context/UserContext";
+import { logBotGameStarted, logGameCompleted } from "../utils/stats";
 
 export default function BoardWrapper() {
     // Track which game ID we've already attempted to join
@@ -380,6 +381,13 @@ export default function BoardWrapper() {
                 online.resign();
             }
         }
+        
+        // Log timeout for bot games (friend games are logged server-side)
+        if (mode === 'local') {
+            logGameCompleted(null, 'timeout', winner, true);
+            localStorage.removeItem('chess_active_bot_game');
+        }
+        
         clock.pause?.();
     }, [clock.status, mode, online, chess.playerColor]);
     // --------------------------------------
@@ -432,6 +440,9 @@ export default function BoardWrapper() {
         if (settings.isTimed && shortColor === 'b') {
             clock.start('w');
         }
+        
+        // Log bot game started for analytics
+        logBotGameStarted(settings.skillLevel, shortColor);
     }
 
     function handleStartFriendGame(settings) {
@@ -481,6 +492,10 @@ export default function BoardWrapper() {
             const winner = chess.turn === 'w' ? 'black' : 'white';
             setGameOverInfo({ reason: 'resignation', winner });
             clock.pause?.();
+            
+            // Log bot game resignation for analytics
+            logGameCompleted(null, 'resignation', winner, true);
+            
             // Clear bot game from storage when game ends
             if (typeof window !== 'undefined') {
                 localStorage.removeItem('chess_active_bot_game');
@@ -559,6 +574,12 @@ export default function BoardWrapper() {
             }
             setGameOverInfo({ reason, winner });
             clock.pause?.();
+            
+            // Log bot game completion for analytics
+            logGameCompleted(null, reason, winner, true);
+            
+            // Clear the active bot game from localStorage since it's finished
+            localStorage.removeItem('chess_active_bot_game');
         }
     }, [mode, chess.chessGame, chess.turn, gameOverInfo, clock]);
 

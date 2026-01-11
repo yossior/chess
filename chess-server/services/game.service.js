@@ -2,6 +2,7 @@ const { Chess } = require("chess.js");
 const { CLOCK } = require("../config/constants");
 const Game = require("../models/game.model");
 const User = require("../models/user.model");
+const statsService = require("./stats.service");
 
 class GameService {
   constructor() {
@@ -467,6 +468,16 @@ class GameService {
       }
 
       game.savedGameId = newGame._id;
+
+      // Log game completion stats (PvP games only - bot games are logged from frontend)
+      await statsService.logGameCompleted(
+        gameId, 
+        result, 
+        winner, 
+        false, // isBotGame - server-side games are always PvP
+        null,  // sessionId
+        whitePlayer?.userId || blackPlayer?.userId
+      );
 
       console.log(`[DB] Saved game ${gameId} to database with ID ${newGame._id}`);
       return newGame._id;
