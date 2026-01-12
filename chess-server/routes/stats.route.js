@@ -50,13 +50,46 @@ router.post('/bot-game-started', async (req, res) => {
 /**
  * POST /api/stats/game-completed
  * Log when a game is completed (can also be called from frontend for bot games)
+ * For bot games, also saves the full game to the games collection
  */
 router.post('/game-completed', async (req, res) => {
-  const { gameId, result, winner, isBotGame, sessionId, userId } = req.body;
+  const { 
+    gameId, 
+    result, 
+    winner, 
+    isBotGame, 
+    sessionId, 
+    userId,
+    // New fields for bot games - full game data
+    moves,
+    fen,
+    skillLevel,
+    playerColor,
+    isUnbalanced,
+    startedAt
+  } = req.body;
   const userAgent = req.headers['user-agent'];
   const ip = getClientIp(req);
   
-  await statsService.logGameCompleted(gameId, result, winner, isBotGame, sessionId, userId, userAgent, ip);
+  await statsService.logGameCompleted(
+    gameId, 
+    result, 
+    winner, 
+    isBotGame, 
+    sessionId, 
+    userId, 
+    userAgent, 
+    ip,
+    // Pass additional bot game data
+    {
+      moves,
+      fen,
+      skillLevel,
+      playerColor,
+      isUnbalanced,
+      startedAt
+    }
+  );
   res.status(200).json({ success: true });
 });
 

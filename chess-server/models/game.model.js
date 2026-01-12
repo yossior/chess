@@ -4,13 +4,22 @@ const gameSchema = new mongoose.Schema({
   gameId: { type: String, unique: true, sparse: true, index: true }, // Custom game ID for temp games
   white: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: false, default: null },
   whiteSessionId: { type: String, required: false, default: null }, // Session ID if white is guest
+  whiteIp: { type: String, required: false, default: null },
+  whiteUserAgent: { type: String, required: false, default: null },
   black: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: false, default: null },
   blackSessionId: { type: String, required: false, default: null }, // Session ID if black is guest
+  blackIp: { type: String, required: false, default: null },
+  blackUserAgent: { type: String, required: false, default: null },
   
   // Game state
   fen: { type: String, default: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1' },
   moves: [{ type: String }], // Array of moves in algebraic notation
   isUnbalanced: { type: Boolean, default: true },
+  
+  // Bot game specific fields
+  isBotGame: { type: Boolean, default: false, index: true },
+  skillLevel: { type: Number, default: null }, // Bot skill level (1-20 for Stockfish)
+  playerColor: { type: String, enum: ['w', 'b', null], default: null }, // Human player's color in bot games
   
   // Clock times in milliseconds
   whiteMs: { type: Number, default: 300000 },
@@ -27,7 +36,7 @@ const gameSchema = new mongoose.Schema({
   // Game result (only if completed)
   result: {
     type: String,
-    enum: ['checkmate', 'draw', 'resignation', 'timeout', 'stalemate', null],
+    enum: ['checkmate', 'draw', 'resignation', 'timeout', 'stalemate', 'abandonment', null],
     default: null
   },
   winner: {

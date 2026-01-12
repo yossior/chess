@@ -1,6 +1,10 @@
 const gameService = require('../services/game.service');
 const statsService = require('../services/stats.service');
 
+// Track disconnect timeouts for players (gameId -> { color, timeout })
+const disconnectTimeouts = new Map();
+const DISCONNECT_TIMEOUT_MS = 20 * 1000; // 20 seconds
+
 /**
  * Helper to extract client IP from socket handshake
  */
@@ -71,6 +75,19 @@ function registerSocketHandlers(io, socket) {
   // Resignation
   socket.on("resign", ({ gameId }) => {
     handleResign(io, socket, gameId);
+  });
+
+  // Bot game tracking (for disconnect/abandonment handling)
+  socket.on("botGameStarted", ({ gameId, skillLevel, playerColor, isUnbalanced }) => {
+    handleBotGameStarted(socket, gameId, skillLevel, playerColor, isUnbalanced);
+  });
+
+  socket.on("botGameMove", ({ gameId, moves, fen }) => {
+    handleBotGameMove(socket, gameId, moves, fen);
+  });
+
+  socket.on("botGameEnded", ({ gameId }) => {
+    handleBotGameEnded(socket, gameId);
   });
 
   // Disconnection
@@ -223,6 +240,16 @@ async function handleJoinGame(io, socket, gameId, userId = null, timeMinutes = n
   if (currentPlayer) {
     currentPlayer.ip = socket.data.ip;
     currentPlayer.userAgent = socket.data.userAgent;
+    
+    // Cancel any disconnect timeout for this player
+    const timeoutKey = `${gameId}_${currentPlayer.color}`;
+    if (disconnectTimeouts.has(timeoutKey)) {
+      clearTimeout(disconnectTimeouts.get(timeoutKey).timeout);
+      disconnectTimeouts.delete(timeoutKey);
+      console.log(`[Game] Cancelled disconnect timeout for ${currentPlayer.color} in game ${gameId}`);
+      // Notify other players that opponent has reconnected
+      io.to(gameId).emit("opponentReconnected");
+    }
   }
 
   // Join socket to the room
@@ -255,8 +282,12 @@ async function handleJoinGame(io, socket, gameId, userId = null, timeMinutes = n
       serverTime: now,
       history: game.historyMoves,
       movesInTurn: game.movesInTurn,
+      // Include game over info if game is completed
+      isCompleted: game.isCompleted || false,
+      gameResult: game.gameResult || null,
+      winner: game.winner || null,
     });
-    console.log(`[Game] ${socket.id} reconnected to game ${gameId} as ${player.color}`);
+    console.log(`[Game] ${socket.id} reconnected to game ${gameId} as ${player.color} (completed: ${game.isCompleted})`);
     return;
   }
   
@@ -420,13 +451,116 @@ function handleDisconnect(io, socket) {
     return;
   }
 
-  // Notify opponents but keep the game for spectators/completed viewing
-  for (const [gameId, game] of gameService.games.entries()) {
-    if (game.players.some((p) => p.socketId === socket.id)) {
-      io.to(gameId).emit("opponentDisconnected");
-      console.log(`[Game] Player disconnected from ${gameId}, game preserved for spectators`);
+  // Handle bot game disconnect - set timeout to save as abandoned
+  if (socket.data.botGame && !socket.data.botGame.isCompleted) {
+    const botGame = socket.data.botGame;
+    
+    // Only set timeout if moves were made
+    if (botGame.moves && botGame.moves.length > 0) {
+      console.log(`[BotGame] Player disconnected from bot game ${botGame.gameId}, starting 1-minute abort timer`);
+      
+      const timeoutKey = `bot_${botGame.gameId}`;
+      if (disconnectTimeouts.has(timeoutKey)) {
+        clearTimeout(disconnectTimeouts.get(timeoutKey).timeout);
+      }
+      
+      // Set 1-minute timeout to save the bot game as abandoned
+      const timeout = setTimeout(async () => {
+        await handleBotGameAbort(socket);
+        disconnectTimeouts.delete(timeoutKey);
+      }, DISCONNECT_TIMEOUT_MS);
+      
+      disconnectTimeouts.set(timeoutKey, {
+        timeout,
+        disconnectedAt: Date.now(),
+        socket // Keep reference to socket for the abort handler
+      });
+    } else {
+      console.log(`[BotGame] Player disconnected from bot game ${botGame.gameId} before any moves`);
     }
   }
+
+  // Handle PvP game disconnect
+  for (const [gameId, game] of gameService.games.entries()) {
+    const player = game.players.find((p) => p.socketId === socket.id);
+    if (!player) continue;
+    
+    // Skip if game is already completed
+    if (game.isCompleted) {
+      console.log(`[Game] Player disconnected from completed game ${gameId}`);
+      continue;
+    }
+    
+    // Skip if game hasn't started yet (no moves made)
+    if (!game.historyMoves || game.historyMoves.length === 0) {
+      console.log(`[Game] Player disconnected from game ${gameId} before any moves, not setting abort timer`);
+      io.to(gameId).emit("opponentDisconnected");
+      continue;
+    }
+    
+    // Notify opponent
+    io.to(gameId).emit("opponentDisconnected");
+    console.log(`[Game] Player ${player.color} disconnected from ${gameId}, starting abort timer`);
+    
+    // Store the disconnected socket ID before clearing it
+    const disconnectedSocketId = socket.id;
+    
+    // Clear the player's socket ID to mark them as disconnected
+    player.socketId = null;
+    
+    // Clear any existing timeout for this game/player
+    const timeoutKey = `${gameId}_${player.color}`;
+    if (disconnectTimeouts.has(timeoutKey)) {
+      clearTimeout(disconnectTimeouts.get(timeoutKey).timeout);
+    }
+    
+    // Set timeout to abort the game
+    const timeout = setTimeout(() => {
+      handleGameAbort(io, gameId, player.color);
+      disconnectTimeouts.delete(timeoutKey);
+    }, DISCONNECT_TIMEOUT_MS);
+    
+    disconnectTimeouts.set(timeoutKey, {
+      color: player.color,
+      timeout,
+      disconnectedAt: Date.now(),
+      disconnectedSocketId
+    });
+  }
+}
+
+/**
+ * Handle game abort due to disconnect timeout
+ */
+function handleGameAbort(io, gameId, disconnectedColor) {
+  const game = gameService.getGame(gameId);
+  if (!game) return;
+  
+  // Don't abort if game is already completed
+  if (game.isCompleted) {
+    console.log(`[Game] Abort timer fired but game ${gameId} is already completed`);
+    return;
+  }
+  
+  // Check if the disconnected player has reconnected
+  const player = game.players.find(p => p.color === disconnectedColor);
+  if (player && player.socketId) {
+    console.log(`[Game] Player ${disconnectedColor} reconnected to ${gameId}, cancelling abort`);
+    return;
+  }
+  
+  const winner = disconnectedColor === 'w' ? 'black' : 'white';
+  
+  console.log(`[Game] Aborting game ${gameId} - ${disconnectedColor} disconnected for 1 minute`);
+  
+  io.to(gameId).emit("gameOver", { 
+    reason: "abandonment",
+    winner: winner,
+    abandonedColor: disconnectedColor
+  });
+
+  // Save game to database with abandonment result
+  gameService.saveGameToDb(gameId, "abandonment", winner);
 }
 
 /**
@@ -457,6 +591,91 @@ function handleResign(io, socket, gameId) {
   gameService.saveGameToDb(gameId, "resignation", winner);
 
   console.log(`[Game] ${player.color} resigned in game ${gameId}`);
+}
+
+/**
+ * Handle bot game started - store in memory for disconnect tracking
+ */
+function handleBotGameStarted(socket, gameId, skillLevel, playerColor, isUnbalanced) {
+  if (!gameId) return;
+  
+  // Store bot game in the socket's data for tracking
+  socket.data.botGame = {
+    gameId,
+    skillLevel,
+    playerColor,
+    isUnbalanced,
+    moves: [],
+    fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
+    startedAt: new Date().toISOString(),
+    isCompleted: false
+  };
+  
+  console.log(`[BotGame] Started: ${gameId} (socket: ${socket.id}, skill: ${skillLevel}, color: ${playerColor})`);
+}
+
+/**
+ * Handle bot game move - update stored state
+ */
+function handleBotGameMove(socket, gameId, moves, fen) {
+  if (!socket.data.botGame || socket.data.botGame.gameId !== gameId) return;
+  
+  socket.data.botGame.moves = moves || [];
+  socket.data.botGame.fen = fen || socket.data.botGame.fen;
+  
+  // Only log occasionally to avoid spam
+  if (moves && moves.length % 10 === 0) {
+    console.log(`[BotGame] Move update: ${gameId} (${moves.length} moves)`);
+  }
+}
+
+/**
+ * Handle bot game ended normally (checkmate, draw, resignation, timeout)
+ * This clears the bot game from tracking so it won't be saved as abandoned
+ */
+function handleBotGameEnded(socket, gameId) {
+  if (!socket.data.botGame || socket.data.botGame.gameId !== gameId) return;
+  
+  socket.data.botGame.isCompleted = true;
+  console.log(`[BotGame] Ended normally: ${gameId}`);
+}
+
+/**
+ * Handle bot game abandonment (called from disconnect timeout)
+ */
+async function handleBotGameAbort(socket) {
+  const botGame = socket.data.botGame;
+  if (!botGame) return;
+  if (botGame.isCompleted) return;
+  if (!botGame.moves || botGame.moves.length === 0) {
+    console.log(`[BotGame] Not saving abandoned game ${botGame.gameId} - no moves made`);
+    return;
+  }
+  
+  console.log(`[BotGame] Saving abandoned game: ${botGame.gameId} (${botGame.moves.length} moves)`);
+  
+  // Save to database via stats service
+  await statsService.logGameCompleted(
+    botGame.gameId,
+    'abandonment',
+    null, // No winner for abandoned games
+    true, // isBotGame
+    null, // sessionId
+    null, // userId
+    socket.data.userAgent,
+    socket.data.ip,
+    {
+      moves: botGame.moves,
+      fen: botGame.fen,
+      skillLevel: botGame.skillLevel,
+      playerColor: botGame.playerColor,
+      isUnbalanced: botGame.isUnbalanced,
+      startedAt: botGame.startedAt
+    }
+  );
+  
+  // Clear the bot game data
+  socket.data.botGame = null;
 }
 
 module.exports = { registerSocketHandlers };

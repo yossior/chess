@@ -324,6 +324,20 @@ export default function BoardWrapper() {
         return () => window.removeEventListener("keydown", handleKeyDown);
     }, [chess.moveHistory]);
 
+    // Sync bot game moves to server for disconnect tracking
+    useEffect(() => {
+        if (mode !== 'local' || !currentBotGameId) return;
+        
+        // Get current moves and fen from the chess game
+        const moves = chess.chessGameRef.current?.history() || [];
+        const fen = chess.chessGameRef.current?.fen() || '';
+        
+        // Notify server of the current game state (only if moves have been made)
+        if (moves.length > 0) {
+            online.notifyBotGameMove(currentBotGameId, moves, fen);
+        }
+    }, [chess.moveHistory, mode, currentBotGameId, online]);
+
     // Clock flag -> treat as game over (timeout)
     useEffect(() => {
         if (!clock.status) return;
@@ -342,7 +356,12 @@ export default function BoardWrapper() {
         
         // Log timeout for bot games (friend games are logged server-side)
         if (mode === 'local') {
-            logGameCompleted(currentBotGameId, 'timeout', winner, true);
+            logGameCompleted(currentBotGameId, 'timeout', winner, true, {
+                moves: chess.chessGame.history(),
+                fen: chess.chessGame.fen()
+            });
+            // Notify server that bot game ended (server can stop tracking it)
+            online.notifyBotGameEnded(currentBotGameId);
             setCurrentBotGameId(null);
         }
         
@@ -400,8 +419,10 @@ export default function BoardWrapper() {
         }
         
         // Log bot game started for analytics and capture the game ID
-        logBotGameStarted(settings.skillLevel, shortColor).then(gameId => {
+        logBotGameStarted(settings.skillLevel, shortColor, settings.isUnbalanced).then(gameId => {
             setCurrentBotGameId(gameId);
+            // Notify server about bot game start for disconnect tracking
+            online.notifyBotGameStarted(gameId, settings.skillLevel, shortColor, settings.isUnbalanced);
         });
     }
 
@@ -453,8 +474,14 @@ export default function BoardWrapper() {
             setGameOverInfo({ reason: 'resignation', winner });
             clock.pause?.();
             
-            // Log bot game resignation for analytics
-            logGameCompleted(currentBotGameId, 'resignation', winner, true);
+            // Log bot game resignation for analytics with full game data
+            logGameCompleted(currentBotGameId, 'resignation', winner, true, {
+                moves: chess.chessGame.history(),
+                fen: chess.chessGame.fen()
+            });
+            
+            // Notify server that bot game ended (server can stop tracking it)
+            online.notifyBotGameEnded(currentBotGameId);
             
             // Clear bot game ID
             setCurrentBotGameId(null);
@@ -482,8 +509,14 @@ export default function BoardWrapper() {
             setGameOverInfo({ reason, winner });
             clock.pause?.();
             
-            // Log bot game completion for analytics
-            logGameCompleted(currentBotGameId, reason, winner, true);
+            // Log bot game completion for analytics with full game data
+            logGameCompleted(currentBotGameId, reason, winner, true, {
+                moves: chess.chessGame.history(),
+                fen: chess.chessGame.fen()
+            });
+            
+            // Notify server that bot game ended (server can stop tracking it)
+            online.notifyBotGameEnded(currentBotGameId);
             
             // Clear the bot game ID since it's finished
             setCurrentBotGameId(null);
@@ -542,6 +575,15 @@ export default function BoardWrapper() {
         const effectivePlayer = flipBoard 
             ? (player === 'player' ? 'opponent' : 'player') 
             : player;
+
+        // If at opening position (viewIndex === -1), show initial time
+        if (viewIndex === -1) {
+            // Get initial time from clock or use default (3 minutes for friend, botTimeMinutes for bot)
+            const initialMs = mode === "friend" 
+                ? (clock.initialMs || 180000)  // Default 3 minutes for friend games
+                : (isBotGameTimed ? botTimeMinutes * 60 * 1000 : 180000);
+            return initialMs;
+        }
 
         // If viewing history and move has timing info, show clock at that move
         if (viewIndex !== null && viewIndex >= 0) {
@@ -797,7 +839,13 @@ export default function BoardWrapper() {
             </div>
 
         {gameOverInfo && !gameOverInfo.dismissed && (
-            <div className="absolute inset-0 bg-black/40 flex items-center justify-center z-50" onClick={() => setGameOverInfo({...gameOverInfo, dismissed: true})}>
+            <div 
+                className="absolute inset-0 bg-black/40 flex items-center justify-center z-50" 
+                onClick={() => setGameOverInfo({...gameOverInfo, dismissed: true})}
+                onKeyDown={(e) => { if (e.key === 'Enter') setGameOverInfo({...gameOverInfo, dismissed: true}); }}
+                tabIndex={0}
+                ref={(el) => el?.focus()}
+            >
                 <div className="bg-slate-800/95 backdrop-blur-xl rounded-3xl shadow-2xl p-8 w-[360px] text-center space-y-6 border border-slate-700/50" onClick={(e) => e.stopPropagation()}>
                     <div className="text-6xl animate-bounce">
                         {gameOverInfo.winner ? '🏆' : '🤝'}

@@ -163,8 +163,8 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
       }
     });
 
-    socket.on("gameStarted", ({ gameId, color, fen, turn, whiteMs, blackMs, incrementMs, serverTime, history, movesInTurn }) => {
-      console.log("game started", gameId, color);
+    socket.on("gameStarted", ({ gameId, color, fen, turn, whiteMs, blackMs, incrementMs, serverTime, history, movesInTurn, isCompleted, gameResult, winner }) => {
+      console.log("game started", gameId, color, "completed:", isCompleted);
       console.log('[Online] gameStarted - clock times:', { whiteMs, blackMs, turn });
       
       // Clear old games but keep this one (since we are joining as a player)
@@ -177,18 +177,24 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
       propsRef.current.setPlayerColor(color);
       setIsSpectator(false);
 
-      // Store game info for reconnection on page refresh
-      if (typeof window !== 'undefined') {
-        const timeMinutes = Math.round(whiteMs / 1000 / 60);
-        const incrementSeconds = incrementMs ? Math.round(incrementMs / 1000) : 2;
-        
-        localStorage.setItem(`chess_active_game`, JSON.stringify({
-          gameId,
-          color,
-          mode: 'friend',
-          timeMinutes,
-          incrementSeconds
-        }));
+      // If game is already completed, don't store it for reconnection - just show the result
+      if (!isCompleted) {
+        // Store game info for reconnection on page refresh
+        if (typeof window !== 'undefined') {
+          const timeMinutes = Math.round(whiteMs / 1000 / 60);
+          const incrementSeconds = incrementMs ? Math.round(incrementMs / 1000) : 2;
+          
+          localStorage.setItem(`chess_active_game`, JSON.stringify({
+            gameId,
+            color,
+            mode: 'friend',
+            timeMinutes,
+            incrementSeconds
+          }));
+        }
+      } else {
+        // Clear any stored game data since game is completed
+        localStorage.removeItem('chess_active_game');
       }
 
       // Store increment (convert ms to seconds)
@@ -222,6 +228,11 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
         }
       } catch (e) {
         console.warn("failed to load fen", e);
+      }
+      
+      // If game is completed, notify the game over handler
+      if (isCompleted && propsRef.current.onGameOver) {
+        propsRef.current.onGameOver({ reason: gameResult || 'game over', winner: winner || null });
       }
     });
 
@@ -504,6 +515,30 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
     setError(null);
   }, []);
 
+  // Bot game tracking methods - send game state to server for disconnect handling
+  const notifyBotGameStarted = useCallback((gameId, skillLevel, playerColor, isUnbalanced) => {
+    const socket = socketRef.current;
+    if (socket && socket.connected) {
+      socket.emit('botGameStarted', { gameId, skillLevel, playerColor, isUnbalanced });
+      console.log('[Socket] Bot game started:', gameId);
+    }
+  }, []);
+
+  const notifyBotGameMove = useCallback((gameId, moves, fen) => {
+    const socket = socketRef.current;
+    if (socket && socket.connected) {
+      socket.emit('botGameMove', { gameId, moves, fen });
+    }
+  }, []);
+
+  const notifyBotGameEnded = useCallback((gameId) => {
+    const socket = socketRef.current;
+    if (socket && socket.connected) {
+      socket.emit('botGameEnded', { gameId });
+      console.log('[Socket] Bot game ended:', gameId);
+    }
+  }, []);
+
   // Memoize return object to prevent infinite dependency loops in useEffect
   return useMemo(() => ({
     socketRef,
@@ -520,5 +555,9 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
     resign,
     disconnect,
     clearError,
-  }), [waiting, gameId, playerColor, isConnected, isSpectator, opponentNames, error, findOnlineGame, joinSpecificGame, sendMoveOnline, resign, disconnect, clearError]);
+    // Bot game methods
+    notifyBotGameStarted,
+    notifyBotGameMove,
+    notifyBotGameEnded,
+  }), [waiting, gameId, playerColor, isConnected, isSpectator, opponentNames, error, findOnlineGame, joinSpecificGame, sendMoveOnline, resign, disconnect, clearError, notifyBotGameStarted, notifyBotGameMove, notifyBotGameEnded]);
 }

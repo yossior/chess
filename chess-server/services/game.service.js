@@ -1,6 +1,7 @@
 const { Chess } = require("chess.js");
 const { CLOCK } = require("../config/constants");
 const Game = require("../models/game.model");
+const User = require("../models/user.model");
 const statsService = require("./stats.service");
 
 class GameService {
@@ -75,6 +76,8 @@ class GameService {
     if (!gameId) return null;
     if (this.games.has(gameId)) return this.games.get(gameId);
 
+    console.log(`[DB] Attempting to hydrate game ${gameId} from database...`);
+
     let dbGame = null;
     try {
       dbGame = await Game.findOne({ gameId })
@@ -85,9 +88,12 @@ class GameService {
       return null;
     }
 
-    if (!dbGame) return null;
+    if (!dbGame) {
+      console.log(`[DB] Game ${gameId} not found in database`);
+      return null;
+    }
 
-    console.log(`[DB] Hydrating game ${gameId} from database (completed: ${this._isDbGameCompleted(dbGame)})`);
+    console.log(`[DB] Hydrating game ${gameId} from database (completed: ${this._isDbGameCompleted(dbGame)}, moves: ${dbGame.moves?.length || 0})`);
 
     const isCompleted = this._isDbGameCompleted(dbGame);
     const gameIsUnbalanced = dbGame.isUnbalanced !== undefined ? dbGame.isUnbalanced : true;
@@ -230,11 +236,13 @@ class GameService {
       if (userId && !existingPlayer.userId) {
         existingPlayer.userId = userId;
       }
-      console.log(`[Game] Player reconnected to game ${gameId} as ${existingPlayer.color}`);
-      return { game, role: 'player', reconnected: true };
+      console.log(`[Game] Player reconnected to game ${gameId} as ${existingPlayer.color} (completed: ${game.isCompleted})`);
+      // Return as player with reconnected flag - even for completed games
+      // The handler will send the appropriate event (with game over info if completed)
+      return { game, role: 'player', reconnected: true, isCompleted: game.isCompleted };
     }
     
-    // If game is completed, return as spectator
+    // If game is completed and not an existing player, return as spectator
     if (game.isCompleted) {
       game.spectators.push({ socketId, userId });
       return { game, role: 'spectator' };
@@ -432,6 +440,16 @@ class GameService {
       const whitePlayer = game.players.find(p => p.color === 'w');
       const blackPlayer = game.players.find(p => p.color === 'b');
 
+      // Get moves - prefer chess.history() but fallback to historyMoves array
+      let moves = [];
+      if (game.chess && typeof game.chess.history === 'function') {
+        moves = game.chess.history();
+      }
+      // Fallback: extract SANs from historyMoves if chess.history() is empty
+      if (moves.length === 0 && game.historyMoves && game.historyMoves.length > 0) {
+        moves = game.historyMoves.map(m => m.san).filter(Boolean);
+      }
+
       // Save game to database (even for guest games, so they can be viewed)
       // Use upsert by gameId to avoid duplicate key errors if game was already synced
       const newGame = await Game.findOneAndUpdate(
@@ -439,9 +457,13 @@ class GameService {
         {
           $set: {
             white: whitePlayer?.userId || null,
+            whiteIp: whitePlayer?.ip || null,
+            whiteUserAgent: whitePlayer?.userAgent || null,
             black: blackPlayer?.userId || null,
-            moves: game.chess.history(),
-            fen: game.chess.fen(),
+            blackIp: blackPlayer?.ip || null,
+            blackUserAgent: blackPlayer?.userAgent || null,
+            moves: moves,
+            fen: game.chess?.fen() || game.historyMoves?.[game.historyMoves.length - 1]?.fen || 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
             status: 'completed',
             result: result, // 'checkmate', 'draw', 'resignation', etc.
             winner: winner, // 'white', 'black', or null
