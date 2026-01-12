@@ -11,7 +11,7 @@
 // This gives us Marseillais chess methods: turns(), playTurn(), undoTurn()
 import { Chess } from 'chess.js';
 
-console.log('[marseillais-engine.worker] v8.0 Heuristic Best-Response');
+console.log('[marseillais-engine.worker] v8.2 Fast Heuristic');
 
 // ============================================================================
 // CONSTANTS
@@ -166,8 +166,8 @@ function opponentBestResponse(chess, debug = false) {
     return bCapture - aCapture;
   });
   
-  // Only check top 50 most threatening turns
-  const checkCount = Math.min(50, oppTurns.length);
+  // Only check top 20 most threatening turns
+  const checkCount = Math.min(20, oppTurns.length);
   
   let bestScore = oppColor === 'w' ? -Infinity : Infinity;
   let bestTurn = null;
@@ -215,67 +215,28 @@ function evaluateTurn(chess, turn, ourColor, debug = false) {
 }
 
 /**
- * Quick pre-filter score (for sorting candidates)
- * Material gain from captures + positional score + hanging penalty
+ * Ultra-fast pre-filter score (NO board play, just move analysis)
+ * Only looks at captures and check - enough to sort candidates
  */
-function quickEval(chess, turn, ourColor) {
-  // FIRST: Calculate material gained by OUR turn's captures
-  // This ensures queen captures etc. are prioritized in candidate selection
-  let captureGain = 0;
-  for (const m of turn) {
-    if (m.captured) {
-      captureGain += PIECE_VALUES[m.captured] || 0;
-    }
-  }
-  
-  playTurn(chess, turn);
-  if (chess.isCheckmate()) {
-    chess.undoTurn();
-    return 100000;
-  }
-  
-  // Positional evaluation (PST only)
-  const board = chess.board();
+function quickScore(turn) {
   let score = 0;
   
-  for (let rank = 0; rank < 8; rank++) {
-    for (let file = 0; file < 8; file++) {
-      const piece = board[rank][file];
-      if (!piece) continue;
-      
-      const square = String.fromCharCode(97 + file) + (8 - rank);
-      const pstValue = PST[piece.type]?.[getPstIndex(square, piece.color)] || 0;
-      
-      if (piece.color === 'w') {
-        score += pstValue;
-      } else {
-        score -= pstValue;
-      }
-    }
-  }
-  
-  // Penalty if opponent can capture something with first move
-  const oppMoves = chess.moves({ verbose: true });
-  let maxCapture = 0;
-  for (const m of oppMoves) {
+  for (const m of turn) {
+    // Captures: queen=900, rook=500, etc.
     if (m.captured) {
-      const capVal = PIECE_VALUES[m.captured] || 0;
-      if (capVal > maxCapture) maxCapture = capVal;
+      score += PIECE_VALUES[m.captured] || 0;
+    }
+    // Giving check is good
+    if (m.san.includes('+')) {
+      score += 50;
+    }
+    // Checkmate
+    if (m.san.includes('#')) {
+      score += 100000;
     }
   }
   
-  // Apply penalty for hanging pieces
-  if (ourColor === 'w') {
-    score -= maxCapture;
-  } else {
-    score += maxCapture;
-  }
-  
-  chess.undoTurn();
-  
-  // Add capture gain to ensure capturing moves rank high
-  const posScore = ourColor === 'w' ? score : -score;
-  return posScore + captureGain;
+  return score;
 }
 
 /**
@@ -294,18 +255,29 @@ function findBestTurn(fen) {
   if (ourTurns.length === 0) return null;
   if (ourTurns.length === 1) return ourTurns[0];
   
-  // Pre-sort by quick eval to check best candidates first
-  const sorted = ourTurns.map(turn => ({ turn, quick: quickEval(chess, turn, ourColor) }));
+  // Ultra-fast pre-sort by captures only (no board play)
+  const sorted = ourTurns.map(turn => ({ turn, quick: quickScore(turn) }));
   sorted.sort((a, b) => b.quick - a.quick);
   
-  // Evaluate top 40 candidates with full opponent response
-  // Increased from 25 to catch more tactical variations
-  const candidateCount = Math.min(40, sorted.length);
+  // Early exit: if top candidate captures queen or better, just use it
+  if (sorted[0].quick >= 800) {
+    console.log(`[Engine] Fast path: ${sorted[0].turn.map(m => m.san).join(' ')} quick=${sorted[0].quick}`);
+    return sorted[0].turn;
+  }
+  
+  // Evaluate top 20 candidates with full opponent response
+  const candidateCount = Math.min(20, sorted.length);
   let bestTurn = sorted[0].turn;
   let bestScore = -Infinity;
   
   for (let i = 0; i < candidateCount; i++) {
     const { turn, quick } = sorted[i];
+    
+    // Alpha-style pruning: skip if quick score is much worse than best found
+    if (bestScore > -Infinity && quick < bestScore - 400) {
+      break; // Remaining candidates are even worse (sorted), so stop
+    }
+    
     const turnStr = turn.map(m => m.san).join(' ');
     
     playTurn(chess, turn);
@@ -317,14 +289,14 @@ function findBestTurn(fen) {
     }
     
     // Get position after opponent's best response
-    const posAfterOpp = opponentBestResponse(chess, i < 5);
+    const posAfterOpp = opponentBestResponse(chess, i < 3);
     
     chess.undoTurn();
     
     // Return from our perspective
     const score = ourColor === 'w' ? posAfterOpp : -posAfterOpp;
     
-    if (i < 5) {
+    if (i < 3) {
       console.log(`[Engine] ${turnStr}: quick=${quick} full=${score}`);
     }
     
@@ -332,12 +304,8 @@ function findBestTurn(fen) {
       bestScore = score;
       bestTurn = turn;
       // Debug when we find a new best
-      if (i >= 5) {
+      if (i >= 3) {
         console.log(`[Engine] NEW BEST at #${i}: ${turnStr} quick=${quick} full=${score}`);
-        // Re-run with debug to see opponent's response
-        playTurn(chess, turn);
-        opponentBestResponse(chess, true);
-        chess.undoTurn();
       }
     }
   }
