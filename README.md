@@ -1,6 +1,6 @@
 # Double Chess
 
-A chess app for **Marseillais chess** (double-move chess) with a custom engine and online multiplayer.
+A chess app for **Marseillais chess** (double-move chess) with a custom engine and online play.
 
 ## About Marseillais Chess
 
@@ -9,16 +9,16 @@ A chess app for **Marseillais chess** (double-move chess) with a custom engine a
 This changes the game significantly—tactics are deeper, piece coordination matters more, and you need to think about your opponent's double-move responses.
 
 ### Rules
+- Each turn consists of 2 consecutive moves by the same player (In the balanced variant, white only gets 1 move on their first turn).
+- If a player delivers check on their first move, they lose the second move of their turn.
+- Checks must be responded to on the first move.
 
-- **Balanced mode**: White makes only one move on their first turn (to reduce first-move advantage)
-- **Check ends turn**: If your first move gives check, you don't get a second move
-- **Checkmate**: Same as regular chess
 
 ## The Engine
 
 Standard engines like Stockfish don't work for double-move chess, so this project includes a custom engine built specifically for Marseillais.
 
-It uses a 10×12 mailbox board representation with minimax and alpha-beta pruning, using standard [piece-square tables](https://www.chessprogramming.org/Piece-Square_Tables) and various positional bonuses.
+The engine uses a 10×12 mailbox board representation with minimax and alpha-beta pruning, using standard [piece-square tables](https://www.chessprogramming.org/Piece-Square_Tables) and various positional bonuses.
 
 See [chess-front/src/workers/double-move-engine.js](./chess-front/src/workers/double-move-engine.js) for the implementation.
 
