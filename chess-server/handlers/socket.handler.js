@@ -647,13 +647,17 @@ async function handleBotGameAbort(socket) {
     return;
   }
   
-  console.log(`[BotGame] Saving abandoned game: ${botGame.gameId} (${botGame.moves.length} moves)`);
+  // Determine winner: the player who abandoned loses, so the bot wins
+  // playerColor is the human's color, so the opposite color wins
+  const winner = botGame.playerColor === 'w' ? 'black' : 'white';
+  
+  console.log(`[BotGame] Saving abandoned game: ${botGame.gameId} (${botGame.moves.length} moves, winner: ${winner})`);
   
   // Save to database via stats service
   await statsService.logGameCompleted(
     botGame.gameId,
     'abandonment',
-    null, // No winner for abandoned games
+    winner, // Bot wins when player abandons
     true, // isBotGame
     null, // sessionId
     null, // userId

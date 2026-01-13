@@ -73,6 +73,13 @@ class StatsService {
    */
   async logGameCompleted(gameId, result, winner, isBotGame = false, sessionId = null, userId = null, userAgent = null, ip = null, botGameData = null) {
     try {
+      // Check if this game was already logged (prevent duplicates from frontend + socket handler)
+      const existingStats = await Stats.findOne({ type: 'game_completed', gameId });
+      if (existingStats) {
+        console.log(`[Stats] Game ${gameId} already logged, skipping duplicate`);
+        return;
+      }
+      
       // Create stats entry with all available data
       await Stats.create({
         type: 'game_completed',
