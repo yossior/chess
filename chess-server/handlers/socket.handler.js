@@ -90,6 +90,21 @@ function registerSocketHandlers(io, socket) {
     handleDeclineDraw(io, socket, gameId);
   });
 
+  // Leave game (cleanup before joining another)
+  socket.on("leaveGame", ({ gameId }) => {
+    if (gameId) {
+      console.log(`[LeaveGame] Socket ${socket.id} leaving game: ${gameId}`);
+      socket.leave(gameId);
+      
+      // If this is a waiting game (only 1 player), delete it
+      const game = gameService.getGame(gameId);
+      if (game && game.players.length === 1 && !game.startedAt) {
+        console.log(`[LeaveGame] Deleting waiting game: ${gameId}`);
+        gameService.deleteGame(gameId);
+      }
+    }
+  });
+
   // Bot game tracking (for disconnect/abandonment handling)
   socket.on("botGameStarted", ({ gameId, skillLevel, playerColor, isUnbalanced }) => {
     handleBotGameStarted(socket, gameId, skillLevel, playerColor, isUnbalanced);
@@ -196,6 +211,18 @@ function handleFindGame(io, socket, userId = null) {
 async function handleJoinGame(io, socket, gameId, userId = null, timeMinutes = null, incrementSeconds = null, playerColor = null) {
   const effectiveUserId = userId ?? socket.data.userId ?? socket.handshake.auth?.userId ?? null;
   if (effectiveUserId) socket.data.userId = effectiveUserId;
+
+  // Leave any other game rooms this socket is in (cleanup old games)
+  const rooms = Array.from(socket.rooms);
+  for (const room of rooms) {
+    // Skip the socket's own ID room and the target game room
+    if (room === socket.id || room === gameId) continue;
+    // Leave old game rooms (game IDs are alphanumeric strings)
+    if (/^[a-z0-9]{8,}$/i.test(room)) {
+      console.log(`[JoinGame] Socket ${socket.id} leaving old game room: ${room}`);
+      socket.leave(room);
+    }
+  }
 
   // Track if this is a join attempt for a game that doesn't exist in memory
   const gameNotInMemory = gameId && !gameService.getGame(gameId);

@@ -85,6 +85,65 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
     }
   };
 
+  /**
+   * Leave current game and reset state (call before creating/joining new game)
+   */
+  const leaveCurrentGame = useCallback(() => {
+    const socket = socketRef.current;
+    const currentGameId = gameIdRef.current;
+    
+    // Collect all game IDs from localStorage that need to be cleaned up
+    const gameIdsToLeave = new Set();
+    
+    if (currentGameId) {
+      gameIdsToLeave.add(currentGameId);
+    }
+    
+    // Also find game IDs from localStorage
+    if (typeof window !== 'undefined') {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (!key) continue;
+        
+        if (key.startsWith('chess_game_')) {
+          const storedGameId = key.replace('chess_game_', '');
+          gameIdsToLeave.add(storedGameId);
+        } else if (key === 'chess_active_game') {
+          try {
+            const activeGame = JSON.parse(localStorage.getItem(key) || '{}');
+            if (activeGame.gameId) {
+              gameIdsToLeave.add(activeGame.gameId);
+            }
+          } catch (e) {
+            // ignore
+          }
+        }
+      }
+    }
+    
+    // Notify server to leave all found game rooms
+    if (socket && socket.connected) {
+      gameIdsToLeave.forEach(gid => {
+        socket.emit("leaveGame", { gameId: gid });
+        console.log("👋 Left game:", gid);
+      });
+    }
+    
+    // Reset all game state
+    setWaiting(false);
+    setGameId(null);
+    gameIdRef.current = null;
+    hasResignedRef.current = false;
+    setIsSpectator(false);
+    setOpponentNames({ white: 'White', black: 'Black' });
+    setError(null);
+    setDrawOffer(null);
+    setDrawOfferSent(false);
+    
+    // Clear all game-related localStorage
+    clearOldGames();
+  }, []);
+
   // Update ref synchronously on EVERY render (not in an effect)
   onGameOverRef.current = onGameOver;
 
@@ -619,9 +678,10 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
     declineDraw,
     disconnect,
     clearError,
+    leaveCurrentGame,
     // Bot game methods
     notifyBotGameStarted,
     notifyBotGameMove,
     notifyBotGameEnded,
-  }), [waiting, gameId, playerColor, isConnected, isSpectator, opponentNames, error, drawOffer, drawOfferSent, findOnlineGame, joinSpecificGame, sendMoveOnline, resign, offerDraw, acceptDraw, declineDraw, disconnect, clearError, notifyBotGameStarted, notifyBotGameMove, notifyBotGameEnded]);
+  }), [waiting, gameId, playerColor, isConnected, isSpectator, opponentNames, error, drawOffer, drawOfferSent, findOnlineGame, joinSpecificGame, sendMoveOnline, resign, offerDraw, acceptDraw, declineDraw, disconnect, clearError, leaveCurrentGame, notifyBotGameStarted, notifyBotGameMove, notifyBotGameEnded]);
 }

@@ -7,7 +7,7 @@
  * - Checks must be responded to on first move
  * 
  * Uses 10x12 Mailbox representation with Int8Array for speed
- * Uses negamax with alpha-beta pruning
+ * Uses minimax with alpha-beta pruning
  */
 
 console.log('[double-move-engine] loaded');

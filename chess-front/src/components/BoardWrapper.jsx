@@ -129,45 +129,60 @@ export default function BoardWrapper() {
             let color = null;
             let timeMinutes = null;
             let incrementSeconds = null;
+            let isCreator = false; // Track if we're the game creator
             
             // Check if we have settings from the current session (game creation)
             if (pendingGameSettings) {
                 color = pendingGameSettings.color;
                 timeMinutes = pendingGameSettings.timeMinutes;
                 incrementSeconds = pendingGameSettings.incrementSeconds;
-                console.log('[BoardWrapper] Using pending settings: color=' + color + ', time=' + timeMinutes);
+                isCreator = true; // We created this game
+                console.log('[BoardWrapper] Using pending settings (creator): color=' + color + ', time=' + timeMinutes);
             } else {
+                // We're NOT the creator - joining via URL
                 // Check if this is a resumed active game (refresh recovery)
                 const activeGameInfo = localStorage.getItem('chess_active_game');
                 try {
                     const gameInfo = JSON.parse(activeGameInfo || '{}');
                     if (gameInfo.gameId === pendingGameId) {
+                        // This is OUR game we're reconnecting to - use our stored color
                         color = gameInfo.color;
                         timeMinutes = gameInfo.timeMinutes;
                         incrementSeconds = gameInfo.incrementSeconds;
+                        isCreator = true; // We were the creator, reconnecting
                     }
                 } catch (e) {
                     // Ignore parse errors
                 }
                 
-                // Fallback: check stored settings from URL join
+                // Fallback: check stored settings from URL join (same-browser testing)
+                // In this case, the stored settings belong to the FIRST player, so we should:
+                // 1. Get the opposite color
+                // 2. NOT send time settings (let server use existing game's settings)
                 if (!color) {
                     const storedSettings = localStorage.getItem(`chess_game_${pendingGameId}`);
                     try {
                         const settings = JSON.parse(storedSettings || '{}');
-                        color = settings.color;
-                        timeMinutes = settings.timeMinutes;
-                        incrementSeconds = settings.incrementSeconds;
+                        // Use opposite color since we're the second player
+                        if (settings.color) {
+                            color = settings.color === 'w' ? 'b' : 'w';
+                        }
+                        // DON'T set timeMinutes/incrementSeconds - we're joining, not creating
                     } catch (e) {
                         // Ignore parse errors
                     }
                 }
             }
             
-            console.log('[BoardWrapper] Joining game:', pendingGameId, 'color:', color, 'time:', timeMinutes, 'ts:', Date.now());
+            // Only send time settings if we're the game creator
+            // This prevents the server from creating a new game when we're trying to join
+            const joinTimeMinutes = isCreator ? timeMinutes : null;
+            const joinIncrementSeconds = isCreator ? incrementSeconds : null;
+            
+            console.log('[BoardWrapper] Joining game:', pendingGameId, 'color:', color, 'time:', joinTimeMinutes, 'isCreator:', isCreator, 'ts:', Date.now());
             // diagnostic: timestamp when issuing join request
             console.log('[BoardWrapper] join request timestamp:', Date.now());
-            online.joinSpecificGame(pendingGameId, null, timeMinutes, incrementSeconds, color);
+            online.joinSpecificGame(pendingGameId, null, joinTimeMinutes, joinIncrementSeconds, color);
             // NOTE: Don't clear pendingGameId here - it will be cleared when gameStarted/spectatorJoined is received
             return;
         }
@@ -384,7 +399,18 @@ export default function BoardWrapper() {
     }
 
     function handleStartBotGame(settings) {
+        // Clear any pending online game state
+        setPendingGameId(null);
+        setPendingGameSettings(null);
+        joinAttemptedRef.current = null;
+        
+        // Leave any current online game
+        if (online?.leaveCurrentGame) {
+            online.leaveCurrentGame();
+        }
+        
         setShowPlayBot(false);
+        setShowPlayFriend(false); // Also close friend modal just in case
         setMode("local");
         setGameOverInfo(null);
         setFlipBoard(false);
@@ -428,8 +454,21 @@ export default function BoardWrapper() {
     }
 
     function handleStartFriendGame(settings) {
-        setMode("friend");
+        // Always close the modal first
         setShowPlayFriend(false);
+        
+        // Check if socket is connected before trying to create a game
+        if (!online?.isConnected) {
+            showToast('Connection lost. Please wait and try again.');
+            return;
+        }
+        
+        // Leave any current game first (cleanup old game rooms and state)
+        if (online?.leaveCurrentGame) {
+            online.leaveCurrentGame();
+        }
+        
+        setMode("friend");
         setGameOverInfo(null);
         setFlipBoard(false);
         // Don't set gameStarted=true yet - wait for waitingForOpponent or gameStarted event
@@ -674,9 +713,9 @@ export default function BoardWrapper() {
                         className="text-base md:text-2xl lg:text-3xl font-bold bg-linear-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent cursor-pointer hover:from-blue-300 hover:to-purple-300 transition-all min-w-0 truncate leading-tight"
                         style={{ fontSize: 'clamp(1rem, 6vw, 1.8rem)' }}
                         onClick={() => {
-                            // Full reset: clear all state and disconnect from online game
-                            if (online?.disconnect) {
-                                online.disconnect();
+                            // Leave current game but keep socket connected for reuse
+                            if (online?.leaveCurrentGame) {
+                                online.leaveCurrentGame();
                             }
                             setMode("local");
                             setGameStarted(false);
@@ -689,11 +728,8 @@ export default function BoardWrapper() {
                             setIsBotGameTimed(false);
                             setPendingGameId(null);
                             setPendingGameSettings(null);
+                            joinAttemptedRef.current = null;
                             window.history.pushState({}, '', '/');
-                            if (typeof window !== 'undefined') {
-                                // Clear all localStorage
-                                localStorage.clear();
-                            }
                             chess.resetGame();
                             clock?.pause?.();
                         }}
@@ -771,8 +807,27 @@ export default function BoardWrapper() {
 
             {/* CENTER PANEL: BOARD */}
             <div className="flex flex-col lg:flex-row gap-2 md:gap-4 order-1 lg:order-2">
-                {/* Top clock - mobile only (only show if timed game) */}
-                {(mode === "friend" || isBotGameTimed) && (
+                {/* Mobile Waiting for Opponent Indicator */}
+                {mode === "friend" && online?.waiting && !online?.isSpectator && (
+                    <div className="lg:hidden w-full px-2 mb-2">
+                        <div className="bg-amber-500/20 border border-amber-500/40 rounded-xl p-3 backdrop-blur-sm">
+                            <div className="text-amber-300 font-semibold mb-2 text-center text-sm">⏳ Waiting for opponent...</div>
+                            <div className="text-xs text-amber-200 mb-3 text-center">Share the game link with your friend</div>
+                            <button
+                                onClick={() => {
+                                    navigator.clipboard.writeText(window.location.href);
+                                    showToast('Link copied to clipboard!');
+                                }}
+                                className="w-full py-2 px-4 bg-gradient-to-r from-amber-600 to-amber-700 hover:from-amber-700 hover:to-amber-800 text-white font-semibold text-sm rounded-lg transition-all shadow-lg border border-amber-500/30"
+                            >
+                                📋 Copy Game Link
+                            </button>
+                        </div>
+                    </div>
+                )}
+                
+                {/* Top clock - mobile only (only show if timed game and not waiting) */}
+                {(mode === "friend" || isBotGameTimed) && !(mode === "friend" && online?.waiting) && (
                     <div className="lg:hidden w-full">
                         <ClockView 
                             timeMs={getHistoricalClockTime('opponent')} 
