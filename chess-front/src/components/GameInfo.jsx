@@ -1,9 +1,31 @@
 /**
  * Modern game info panel with visual design
  */
-export default function GameInfo({ mode, gameStatus, isMyTurn, turn, movesInTurn, isUnbalanced, playerColor, onResign, waiting, isSpectator, onCopyLink, winnerInfo, moveHistory, opponentNames }) {
+export default function GameInfo({ 
+  mode, 
+  gameStatus, 
+  isMyTurn, 
+  turn, 
+  movesInTurn, 
+  isUnbalanced, 
+  playerColor, 
+  onResign, 
+  waiting, 
+  isSpectator, 
+  onCopyLink, 
+  winnerInfo, 
+  moveHistory, 
+  opponentNames,
+  // Draw offer props
+  drawOffer,
+  drawOfferSent,
+  onOfferDraw,
+  onAcceptDraw,
+  onDeclineDraw
+}) {
   const turnColor = turn === "w" ? (opponentNames?.white || "White") : (opponentNames?.black || "Black");
   const playerColorName = playerColor === "w" ? (opponentNames?.white || "White") : (opponentNames?.black || "Black");
+  const hasMovesPlayed = moveHistory && moveHistory.length > 0;
   
   return (
     <div className="bg-slate-800/90 backdrop-blur-xl rounded-2xl shadow-xl p-3 md:p-4 space-y-3 border border-slate-700/50 overflow-hidden">
@@ -34,6 +56,28 @@ export default function GameInfo({ mode, gameStatus, isMyTurn, turn, movesInTurn
           >
             📋 Copy Game Link
           </button>
+        </div>
+      )}
+
+      {/* Incoming Draw Offer */}
+      {drawOffer && !isSpectator && (
+        <div className="bg-blue-500/20 border border-blue-500/40 rounded-xl p-3 backdrop-blur-sm">
+          <div className="text-blue-300 font-semibold mb-2 text-center text-sm">🤝 Draw Offered</div>
+          <div className="text-xs text-blue-200 mb-3 text-center">Your opponent offers a draw</div>
+          <div className="flex gap-2">
+            <button
+              onClick={onAcceptDraw}
+              className="flex-1 py-2 px-3 bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white font-semibold text-sm rounded-lg transition-all shadow-lg border border-green-500/30"
+            >
+              ✓ Accept
+            </button>
+            <button
+              onClick={onDeclineDraw}
+              className="flex-1 py-2 px-3 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 text-white font-semibold text-sm rounded-lg transition-all shadow-lg border border-red-500/30"
+            >
+              ✗ Decline
+            </button>
+          </div>
         </div>
       )}
       
@@ -111,15 +155,28 @@ export default function GameInfo({ mode, gameStatus, isMyTurn, turn, movesInTurn
         </div>
       )}
 
-      {/* Resign Button */}
+      {/* Action Buttons - desktop only */}
       {mode && !gameStatus && !isSpectator && (
-        <button
-          onClick={onResign}
-          disabled={winnerInfo || (mode === 'friend' && waiting) || !moveHistory || moveHistory.length === 0}
-          className="w-full mt-2 py-2 px-4 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 disabled:from-slate-600 disabled:to-slate-700 disabled:cursor-not-allowed disabled:opacity-50 text-white font-semibold text-sm rounded-lg transition-all shadow-lg border border-red-500/30 disabled:border-slate-600"
-        >
-          🏳️ Resign
-        </button>
+        <div className="hidden lg:flex gap-2 mt-2">
+          {/* Draw Button - only for online mode */}
+          {mode === 'friend' && (
+            <button
+              onClick={onOfferDraw}
+              disabled={winnerInfo || waiting || !hasMovesPlayed || drawOfferSent || drawOffer}
+              className="flex-1 py-2 px-4 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 disabled:from-slate-600 disabled:to-slate-700 disabled:cursor-not-allowed disabled:opacity-50 text-white font-semibold text-sm rounded-lg transition-all shadow-lg border border-blue-500/30 disabled:border-slate-600"
+            >
+              {drawOfferSent ? '⏳ Sent' : '🤝 Draw'}
+            </button>
+          )}
+          {/* Resign Button */}
+          <button
+            onClick={onResign}
+            disabled={winnerInfo || (mode === 'friend' && waiting) || !hasMovesPlayed}
+            className={`${mode === 'friend' ? 'flex-1' : 'w-full'} py-2 px-4 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 disabled:from-slate-600 disabled:to-slate-700 disabled:cursor-not-allowed disabled:opacity-50 text-white font-semibold text-sm rounded-lg transition-all shadow-lg border border-red-500/30 disabled:border-slate-600`}
+          >
+            🏳️ Resign
+          </button>
+        </div>
       )}
     </div>
   );

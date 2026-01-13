@@ -77,6 +77,19 @@ function registerSocketHandlers(io, socket) {
     handleResign(io, socket, gameId);
   });
 
+  // Draw offers
+  socket.on("offerDraw", ({ gameId }) => {
+    handleOfferDraw(io, socket, gameId);
+  });
+
+  socket.on("acceptDraw", ({ gameId }) => {
+    handleAcceptDraw(io, socket, gameId);
+  });
+
+  socket.on("declineDraw", ({ gameId }) => {
+    handleDeclineDraw(io, socket, gameId);
+  });
+
   // Bot game tracking (for disconnect/abandonment handling)
   socket.on("botGameStarted", ({ gameId, skillLevel, playerColor, isUnbalanced }) => {
     handleBotGameStarted(socket, gameId, skillLevel, playerColor, isUnbalanced);
@@ -91,7 +104,8 @@ function registerSocketHandlers(io, socket) {
   });
 
   // Disconnection
-  socket.on("disconnect", () => {
+  socket.on("disconnect", (reason) => {
+    console.log(`[Disconnect] ${socket.id} reason: ${reason}`);
     handleDisconnect(io, socket);
   });
 }
@@ -442,8 +456,6 @@ function handleMove(io, socket, gameId, move) {
  * Handle player disconnection
  */
 function handleDisconnect(io, socket) {
-  console.log(`[Disconnect] ${socket.id}`);
-
   // If the server is shutting down, avoid emitting game-level disconnect
   // events or logging them as they are expected and noisy during shutdown.
   if (io && io.isShuttingDown) {
@@ -591,6 +603,107 @@ function handleResign(io, socket, gameId) {
   gameService.saveGameToDb(gameId, "resignation", winner);
 
   console.log(`[Game] ${player.color} resigned in game ${gameId}`);
+}
+
+/**
+ * Handle draw offer
+ */
+function handleOfferDraw(io, socket, gameId) {
+  const game = gameService.getGame(gameId);
+  if (!game) {
+    socket.emit("error", "Game not found");
+    return;
+  }
+
+  const player = game.players.find((p) => p.socketId === socket.id);
+  if (!player) {
+    socket.emit("error", "Player not in game");
+    return;
+  }
+
+  // Store the draw offer on the game
+  game.drawOffer = {
+    from: player.color,
+    timestamp: Date.now()
+  };
+
+  // Notify the opponent
+  const opponent = game.players.find((p) => p.color !== player.color);
+  if (opponent?.socketId) {
+    io.to(opponent.socketId).emit("drawOffered", {
+      from: player.color
+    });
+  }
+
+  // Confirm to the offerer
+  socket.emit("drawOfferSent");
+
+  console.log(`[Game] ${player.color} offered draw in game ${gameId}`);
+}
+
+/**
+ * Handle draw acceptance
+ */
+function handleAcceptDraw(io, socket, gameId) {
+  const game = gameService.getGame(gameId);
+  if (!game) {
+    socket.emit("error", "Game not found");
+    return;
+  }
+
+  const player = game.players.find((p) => p.socketId === socket.id);
+  if (!player) {
+    socket.emit("error", "Player not in game");
+    return;
+  }
+
+  // Verify there's a pending draw offer from the opponent
+  if (!game.drawOffer || game.drawOffer.from === player.color) {
+    socket.emit("error", "No draw offer to accept");
+    return;
+  }
+
+  // Clear the draw offer
+  game.drawOffer = null;
+
+  // End the game as a draw by agreement
+  io.to(gameId).emit("gameOver", {
+    reason: "agreement",
+    winner: null
+  });
+
+  // Save game asynchronously
+  gameService.saveGameToDb(gameId, "agreement", null);
+
+  console.log(`[Game] Draw by agreement in game ${gameId}`);
+}
+
+/**
+ * Handle draw decline
+ */
+function handleDeclineDraw(io, socket, gameId) {
+  const game = gameService.getGame(gameId);
+  if (!game) {
+    socket.emit("error", "Game not found");
+    return;
+  }
+
+  const player = game.players.find((p) => p.socketId === socket.id);
+  if (!player) {
+    socket.emit("error", "Player not in game");
+    return;
+  }
+
+  // Clear the draw offer
+  game.drawOffer = null;
+
+  // Notify the opponent that the draw was declined
+  const opponent = game.players.find((p) => p.color !== player.color);
+  if (opponent?.socketId) {
+    io.to(opponent.socketId).emit("drawDeclined");
+  }
+
+  console.log(`[Game] ${player.color} declined draw in game ${gameId}`);
 }
 
 /**

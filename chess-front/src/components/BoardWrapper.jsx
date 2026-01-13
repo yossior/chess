@@ -757,6 +757,11 @@ export default function BoardWrapper() {
                     opponentNames={online?.opponentNames}
                     winnerInfo={gameOverInfo}
                     moveHistory={chess.moveHistory}
+                    drawOffer={online?.drawOffer}
+                    drawOfferSent={online?.drawOfferSent}
+                    onOfferDraw={online?.offerDraw}
+                    onAcceptDraw={online?.acceptDraw}
+                    onDeclineDraw={online?.declineDraw}
                     onCopyLink={() => {
                         navigator.clipboard.writeText(window.location.href);
                         showToast('Link copied to clipboard!');
@@ -797,6 +802,54 @@ export default function BoardWrapper() {
                             timeMs={getHistoricalClockTime('player')} 
                             label={getClockLabel('bottom')} 
                         />
+                    </div>
+                )}
+
+                {/* Incoming Draw Offer - mobile only */}
+                {online?.drawOffer && !online?.isSpectator && (
+                    <div className="lg:hidden w-full px-2">
+                        <div className="bg-blue-500/20 border border-blue-500/40 rounded-xl p-3 backdrop-blur-sm">
+                            <div className="text-blue-300 font-semibold mb-2 text-center text-sm">🤝 Draw Offered</div>
+                            <div className="text-xs text-blue-200 mb-3 text-center">Your opponent offers a draw</div>
+                            <div className="flex gap-2">
+                                <button
+                                    onClick={online?.acceptDraw}
+                                    className="flex-1 py-2 px-3 bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white font-semibold text-sm rounded-lg transition-all shadow-lg border border-green-500/30"
+                                >
+                                    ✓ Accept
+                                </button>
+                                <button
+                                    onClick={online?.declineDraw}
+                                    className="flex-1 py-2 px-3 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 text-white font-semibold text-sm rounded-lg transition-all shadow-lg border border-red-500/30"
+                                >
+                                    ✗ Decline
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* Mobile Action Buttons - below the board */}
+                {mode && !gameStatus && !online?.isSpectator && (mode === 'friend' || chess.moveHistory?.length > 0) && (
+                    <div className="lg:hidden flex gap-2 w-full px-2">
+                        {/* Draw Button - only for online friend mode */}
+                        {mode === 'friend' && (
+                            <button
+                                onClick={online?.offerDraw}
+                                disabled={gameOverInfo || online?.waiting || !chess.moveHistory?.length || online?.drawOfferSent || online?.drawOffer}
+                                className="flex-1 py-2 px-4 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 disabled:from-slate-600 disabled:to-slate-700 disabled:cursor-not-allowed disabled:opacity-50 text-white font-semibold text-sm rounded-lg transition-all shadow-lg border border-blue-500/30 disabled:border-slate-600"
+                            >
+                                {online?.drawOfferSent ? '⏳ Sent' : '🤝 Draw'}
+                            </button>
+                        )}
+                        {/* Resign Button - for both friend and bot modes */}
+                        <button
+                            onClick={handleResign}
+                            disabled={gameOverInfo || (mode === 'friend' && online?.waiting) || !chess.moveHistory?.length}
+                            className={`${mode === 'friend' ? 'flex-1' : 'w-full'} py-2 px-4 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 disabled:from-slate-600 disabled:to-slate-700 disabled:cursor-not-allowed disabled:opacity-50 text-white font-semibold text-sm rounded-lg transition-all shadow-lg border border-red-500/30 disabled:border-slate-600`}
+                        >
+                            🏳️ Resign
+                        </button>
                     </div>
                 )}
                 

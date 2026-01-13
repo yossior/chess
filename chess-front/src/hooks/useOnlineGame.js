@@ -53,6 +53,8 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
   const [isSpectator, setIsSpectator] = useState(false);
   const [opponentNames, setOpponentNames] = useState({ white: 'White', black: 'Black' });
   const [error, setError] = useState(null); // Track connection/game errors
+  const [drawOffer, setDrawOffer] = useState(null); // { from: 'w' | 'b' } or null
+  const [drawOfferSent, setDrawOfferSent] = useState(false); // True if we sent a draw offer
   const initialTime = 300; // Default initial time in seconds
 
   /**
@@ -387,6 +389,22 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
       }
     });
 
+    // Draw offer events
+    socket.on("drawOffered", ({ from }) => {
+      console.log("Draw offered by:", from);
+      setDrawOffer({ from });
+    });
+
+    socket.on("drawOfferSent", () => {
+      console.log("Draw offer sent successfully");
+      setDrawOfferSent(true);
+    });
+
+    socket.on("drawDeclined", () => {
+      console.log("Draw offer was declined");
+      setDrawOfferSent(false);
+    });
+
     // Cleanup: remove listeners and optionally close socket
     return () => {
       console.log("🧹 useOnlineGame cleanup");
@@ -402,6 +420,9 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
       socket.off("opponentMove");
       socket.off("gameOver");
       socket.off("error");
+      socket.off("drawOffered");
+      socket.off("drawOfferSent");
+      socket.off("drawDeclined");
       
       // Delay socket close to handle React Strict Mode double-mounting
       // In Strict Mode, the component unmounts and remounts immediately
@@ -489,6 +510,44 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
     socket.emit("resign", { gameId: currentGameId });
   }, []);
 
+  const offerDraw = useCallback(() => {
+    const socket = socketRef.current;
+    const currentGameId = gameIdRef.current;
+    
+    if (!socket || !socket.connected || !currentGameId) {
+      console.error("Cannot offer draw: socket not connected or no active game");
+      return;
+    }
+    
+    socket.emit("offerDraw", { gameId: currentGameId });
+  }, []);
+
+  const acceptDraw = useCallback(() => {
+    const socket = socketRef.current;
+    const currentGameId = gameIdRef.current;
+    
+    if (!socket || !socket.connected || !currentGameId) {
+      console.error("Cannot accept draw: socket not connected or no active game");
+      return;
+    }
+    
+    setDrawOffer(null);
+    socket.emit("acceptDraw", { gameId: currentGameId });
+  }, []);
+
+  const declineDraw = useCallback(() => {
+    const socket = socketRef.current;
+    const currentGameId = gameIdRef.current;
+    
+    if (!socket || !socket.connected || !currentGameId) {
+      console.error("Cannot decline draw: socket not connected or no active game");
+      return;
+    }
+    
+    setDrawOffer(null);
+    socket.emit("declineDraw", { gameId: currentGameId });
+  }, []);
+
   const disconnect = useCallback(() => {
     const socket = socketRef.current;
     if (socket) {
@@ -549,15 +608,20 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
     isSpectator,
     opponentNames,
     error,
+    drawOffer,
+    drawOfferSent,
     findOnlineGame,
     joinSpecificGame,
     sendMoveOnline,
     resign,
+    offerDraw,
+    acceptDraw,
+    declineDraw,
     disconnect,
     clearError,
     // Bot game methods
     notifyBotGameStarted,
     notifyBotGameMove,
     notifyBotGameEnded,
-  }), [waiting, gameId, playerColor, isConnected, isSpectator, opponentNames, error, findOnlineGame, joinSpecificGame, sendMoveOnline, resign, disconnect, clearError, notifyBotGameStarted, notifyBotGameMove, notifyBotGameEnded]);
+  }), [waiting, gameId, playerColor, isConnected, isSpectator, opponentNames, error, drawOffer, drawOfferSent, findOnlineGame, joinSpecificGame, sendMoveOnline, resign, offerDraw, acceptDraw, declineDraw, disconnect, clearError, notifyBotGameStarted, notifyBotGameMove, notifyBotGameEnded]);
 }

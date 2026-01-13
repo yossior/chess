@@ -36,7 +36,7 @@ const gameSchema = new mongoose.Schema({
   // Game result (only if completed)
   result: {
     type: String,
-    enum: ['checkmate', 'draw', 'resignation', 'timeout', 'stalemate', 'abandonment', null],
+    enum: ['checkmate', 'draw', 'resignation', 'timeout', 'stalemate', 'abandonment', 'agreement', null],
     default: null
   },
   winner: {
