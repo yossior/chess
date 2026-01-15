@@ -228,6 +228,49 @@ export default function BoardWrapper() {
         }
     }, [pendingGameId, pendingGameSettings, online.isConnected, online.joinSpecificGame, chess.chessGame, chess.setChessPosition, chess.setMoveHistory, chess.setHistoryIndex, chess.setTurn, chess.setMovesInTurn, isBotGameTimed, clock.syncFromServer]);
 
+    // Rejoin game when socket reconnects (mobile: returning after sharing link)
+    const wasConnectedRef = useRef(null);
+    
+    useEffect(() => {
+        const wasConnected = wasConnectedRef.current;
+        wasConnectedRef.current = online?.isConnected;
+        
+        // Only act on reconnection (was disconnected, now connected)
+        if (wasConnected === false && online?.isConnected === true && mode === 'friend') {
+            log('[BoardWrapper] Socket reconnected, checking if we need to rejoin game');
+            
+            // Check URL for game ID
+            const pathMatch = window.location.pathname.match(/^\/game\/([a-z0-9_]+)$/);
+            const gameIdFromUrl = pathMatch ? pathMatch[1] : null;
+            
+            if (gameIdFromUrl) {
+                log('[BoardWrapper] Socket reconnected in friend mode with game URL, rejoining:', gameIdFromUrl);
+                
+                // Check if we have pending game info (we're the creator)
+                let color = null;
+                let timeMinutes = null;
+                let incrementSeconds = null;
+                
+                const pendingGame = localStorage.getItem('chess_pending_game');
+                if (pendingGame) {
+                    try {
+                        const gameInfo = JSON.parse(pendingGame);
+                        if (gameInfo.gameId === gameIdFromUrl && gameInfo.expiresAt > Date.now()) {
+                            color = gameInfo.color;
+                            timeMinutes = gameInfo.timeMinutes;
+                            incrementSeconds = gameInfo.incrementSeconds;
+                            log('[BoardWrapper] Rejoining as creator with color:', color);
+                        }
+                    } catch (e) {
+                        // Ignore
+                    }
+                }
+                
+                online.joinSpecificGame(gameIdFromUrl, null, timeMinutes, incrementSeconds, color);
+            }
+        }
+    }, [mode, online?.isConnected, online?.joinSpecificGame]);
+
     // Clear pendingGameId and reset join tracking when the game response is received
     useEffect(() => {
         if (pendingGameId && online?.gameId && online?.gameId === pendingGameId) {
