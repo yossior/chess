@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 // Import worker using Vite's worker import syntax - this bundles all dependencies
 // v2 uses high-performance Int8Array mailbox engine with alpha-beta search
 import MarseillaisEngineWorker from '../workers/marseillais-engine-v2.worker.js?worker';
+import { log } from '../utils/debug';
 
 const LEVELS = {
   1: { depth: 2, description: 'Easy' },
@@ -39,12 +40,21 @@ export function useMarseillaisEngine(
         // Use Vite's worker import which properly bundles all dependencies
         worker = new MarseillaisEngineWorker();
         workerRef.current = worker;
+        
+        // Expose worker globally for debug toggle
+        // Main window.debug() also toggles engine logs
+        window.engineWorker = worker;
+        const originalDebug = window.debug;
+        window.debug = (enabled) => {
+          originalDebug?.(enabled);
+          worker.postMessage({ type: 'debug', enabled });
+        };
 
-        console.log('[useMarseillaisEngine] Initialized worker');
+        log('[useMarseillaisEngine] Initialized worker');
 
         worker.onmessage = e => {
           const { type, move, requestId, error } = e.data;
-          console.log('[useMarseillaisEngine] worker.onmessage', {
+          log('[useMarseillaisEngine] worker.onmessage', {
             type,
             requestId,
             moveCount: Array.isArray(move) ? move.length : 'n/a',
@@ -90,7 +100,7 @@ export function useMarseillaisEngine(
     }
 
     if (requestInFlightRef.current) {
-      console.log(
+      log(
         '[useMarseillaisEngine] makeEngineMove suppressed because request already in flight'
       );
       return;
@@ -100,7 +110,7 @@ export function useMarseillaisEngine(
     const fen = chessGame.fen();
     const requestId = reqIdRef.current++;
 
-    console.log(
+    log(
       '[useMarseillaisEngine] calling engine with skillLevel:',
       skillLevel
     );
@@ -145,11 +155,11 @@ export function useMarseillaisEngine(
 
         for (let i = 0; i < movePair.length; i++) {
           const m = movePair[i];
-          console.log('[useMarseillaisEngine] processing move', i, ':', m);
+          log('[useMarseillaisEngine] processing move', i, ':', m);
 
           const legalMoves =
             chessController.chessGame.moves({ verbose: true }) || [];
-          console.log(
+          log(
             '[useMarseillaisEngine] legal moves available:',
             legalMoves.length,
             'first few:',
@@ -212,7 +222,7 @@ export function useMarseillaisEngine(
         
         if (incrementSeconds > 0 && currentMovesInTurn === 0) {
           const engineColor = playerColor === 'w' ? 'black' : 'white';
-          console.log('[useMarseillaisEngine] Applying increment to engine', engineColor, { currentMovesInTurn });
+          log('[useMarseillaisEngine] Applying increment to engine', engineColor, { currentMovesInTurn });
           clock?.applyIncrement?.(engineColor, incrementSeconds);
         }
         
@@ -230,7 +240,7 @@ export function useMarseillaisEngine(
       const isBalancedFirstTurn = !isUnbalanced && moveHistoryLength === 0 && currentTurn === 'w';
       const maxMoves = isBalancedFirstTurn ? 1 : 2;
       
-      console.log('[useMarseillaisEngine] posting findBestMove', {
+      log('[useMarseillaisEngine] posting findBestMove', {
         requestId,
         skillLevel,
         maxMoves,

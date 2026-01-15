@@ -1,8 +1,7 @@
 const { Chess } = require("chess.js");
 const { CLOCK } = require("../config/constants");
 const Game = require("../models/game.model");
-const User = require("../models/user.model");
-const statsService = require("./stats.service");
+const BotGame = require("../models/botGame.model");
 
 /**
  * Generate a position key from FEN for repetition detection.
@@ -109,17 +108,16 @@ class GameService {
 
     let dbGame = null;
     try {
-      dbGame = await Game.findOne({ gameId })
-        .populate('white', 'username')
-        .populate('black', 'username');
+      dbGame = await Game.findOne({ gameId });
     } catch (error) {
       console.error(`[DB] Failed to query game by gameId ${gameId}:`, error);
       return null;
     }
 
     if (!dbGame) {
-      console.log(`[DB] Game ${gameId} not found in database`);
-      return null;
+      // Try to find in BotGame collection if not found in Game collection
+      console.log(`[DB] Game ${gameId} not found in games, checking bot_games...`);
+      return await this.hydrateBotGameFromDb(gameId);
     }
 
     console.log(`[DB] Hydrating game ${gameId} from database (completed: ${this._isDbGameCompleted(dbGame)}, moves: ${dbGame.moves?.length || 0})`);
@@ -178,6 +176,76 @@ class GameService {
       winner: dbGame.winner ?? null,
       dbStatus: dbGame.status ?? null,
       // Draw tracking - restored from replayed moves
+      positionHistory: positionHistory || new Map(),
+      halfMoveClock: halfMoveClock || 0,
+    };
+
+    this.games.set(gameId, game);
+    return game;
+  }
+
+  /**
+   * Hydrate a bot game from MongoDB by its public gameId.
+   * Bot games are view-only (spectator mode) - no reconnection.
+   */
+  async hydrateBotGameFromDb(gameId) {
+    if (!gameId) return null;
+    if (this.games.has(gameId)) return this.games.get(gameId);
+
+    console.log(`[DB] Attempting to hydrate bot game ${gameId}...`);
+
+    let botGame = null;
+    try {
+      botGame = await BotGame.findOne({ gameId });
+    } catch (error) {
+      console.error(`[DB] Failed to query bot game ${gameId}:`, error);
+      return null;
+    }
+
+    if (!botGame) {
+      console.log(`[DB] Bot game ${gameId} not found`);
+      return null;
+    }
+
+    console.log(`[DB] Hydrating bot game ${gameId} (status: ${botGame.status}, moves: ${botGame.moves?.length || 0})`);
+
+    const isCompleted = botGame.status === 'completed';
+    const gameIsUnbalanced = botGame.isUnbalanced !== undefined ? botGame.isUnbalanced : true;
+    
+    const { chess, historyMoves, movesInTurn, halfMoveClock, positionHistory } = this._replayMovesForSpectator(botGame.moves || [], gameIsUnbalanced);
+
+    // Trust the persisted final FEN for the final position
+    if (botGame.fen) {
+      try {
+        chess.load(botGame.fen);
+      } catch {
+        // ignore; keep replayed position
+      }
+    }
+
+    // Bot games have no real players - just metadata
+    const game = {
+      id: gameId,
+      chess,
+      players: [], // No active players for viewing
+      spectators: [],
+      isBotGame: true,
+      humanColor: botGame.humanColor,
+      createdAt: botGame.startedAt ? new Date(botGame.startedAt).getTime() : Date.now(),
+      startedAt: botGame.startedAt ? new Date(botGame.startedAt).getTime() : null,
+      whiteMs: CLOCK.INITIAL_TIME_MS, // Bot games don't track clock in DB
+      blackMs: CLOCK.INITIAL_TIME_MS,
+      incrementMs: CLOCK.INCREMENT_MS,
+      lastMoveTime: null,
+      historyMoves,
+      movesInTurn,
+      isUnbalanced: gameIsUnbalanced,
+      isCompleted,
+      completedAt: botGame.completedAt ? new Date(botGame.completedAt).getTime() : null,
+      savedGameId: botGame._id,
+      gameResult: botGame.result ?? null,
+      winner: botGame.winner ?? null,
+      dbStatus: botGame.status ?? null,
       positionHistory: positionHistory || new Map(),
       halfMoveClock: halfMoveClock || 0,
     };
@@ -562,16 +630,6 @@ class GameService {
 
       game.savedGameId = newGame._id;
 
-      // Log game completion stats (PvP games only - bot games are logged from frontend)
-      await statsService.logGameCompleted(
-        gameId, 
-        result, 
-        winner, 
-        false, // isBotGame - server-side games are always PvP
-        null,  // sessionId
-        whitePlayer?.userId || blackPlayer?.userId
-      );
-
       console.log(`[DB] Saved game ${gameId} to database with ID ${newGame._id}`);
       return newGame._id;
     } catch (error) {
@@ -585,9 +643,7 @@ class GameService {
    */
   async getCompletedGameFromDb(gameId) {
     try {
-      const game = await Game.findOne({ gameId })
-        .populate('white', 'username')
-        .populate('black', 'username');
+      const game = await Game.findOne({ gameId });
       return game;
     } catch (error) {
       console.error(`[DB] Failed to fetch game ${gameId}:`, error);

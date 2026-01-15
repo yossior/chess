@@ -2,6 +2,7 @@ import { useState, useMemo, useEffect, useRef } from "react";
 import { Chessboard, chessColumnToColumnIndex, fenStringToPositionObject } from "react-chessboard";
 import PromotionModal from "./PromotionModal";
 import usePremoves from "../hooks/usePremoves";
+import { log } from "../utils/debug";
 
 export default function Board({ chess, mode = "local", opponent, clock, viewIndex, onNavigate, orientationOverride, gameStarted = false, incrementSeconds = 2, isTimed = true, gameOver = null }) {
   const [showAnimations, setShowAnimations] = useState(true);
@@ -134,7 +135,7 @@ export default function Board({ chess, mode = "local", opponent, clock, viewInde
     // 3. User is not reviewing historical moves (viewIndex === null)
     // 4. Engine is not already performing another calculation
     if (isEngineTurn && !isGameOver && !isDrawByRepetition && !isDrawByFiftyMove && viewIndex === null && !isBusy) {
-      console.log('[Board] Engine Move Triggered', { 
+      log('[Board] Engine Move Triggered', { 
         turn: currentTurn, 
         playerColor: chess.playerColor,
         gameStarted,
@@ -147,16 +148,16 @@ export default function Board({ chess, mode = "local", opponent, clock, viewInde
         // Double-check conditions haven't changed during the delay
         const latestTurn = chess.chessGame.turn();
         if (latestTurn === currentTurn && !chess.chessGame.isGameOver()) {
-          console.log('[Board] Bot moving now...', { latestTurn });
+          log('[Board] Bot moving now...', { latestTurn });
           opponent.makeEngineMove();
         } else {
-          console.log('[Board] Bot move cancelled (state changed)', { latestTurn, currentTurn });
+          log('[Board] Bot move cancelled (state changed)', { latestTurn, currentTurn });
         }
       }, delay);
       
       return () => clearTimeout(timer);
     } else if (isEngineTurn && !isGameOver && viewIndex === null && isBusy) {
-      console.log('[Board] Engine Move skip: Bot is busy');
+      log('[Board] Engine Move skip: Bot is busy');
     }
   }, [
     chess.chessPosition, 
@@ -188,7 +189,7 @@ export default function Board({ chess, mode = "local", opponent, clock, viewInde
     const { prev: prevMovesInTurn = null, current: newMovesInTurn = null } = move._movesInTurn || {};
 
     // Debug logs to trace increment behavior
-    console.log('[Board] handleMove FULL DEBUG', { 
+    log('[Board] handleMove FULL DEBUG', { 
       from, to, promotion, 
       oldTurn, 
       prevMovesInTurn, 
@@ -204,7 +205,7 @@ export default function Board({ chess, mode = "local", opponent, clock, viewInde
     // Apply increment when the player's turn ended (newMovesInTurn === 0)
     // This covers: second move of double-move, single move in balanced mode, or check ending turn early
     const shouldApplyIncrement = !isFriend && clock && incrementSeconds > 0 && newMovesInTurn === 0;
-    console.log('[Board] Increment check', {
+    log('[Board] Increment check', {
       shouldApplyIncrement,
       isFriend,
       hasClock: !!clock,
@@ -218,11 +219,11 @@ export default function Board({ chess, mode = "local", opponent, clock, viewInde
 
     if (shouldApplyIncrement) {
       const playerWhoJustMoved = oldTurn === 'w' ? 'white' : 'black';
-      console.log('[Board] ✅ Applying increment to player', playerWhoJustMoved, { prevMovesInTurn, newMovesInTurn, incrementSeconds });
+      log('[Board] ✅ Applying increment to player', playerWhoJustMoved, { prevMovesInTurn, newMovesInTurn, incrementSeconds });
       clock.applyIncrement(playerWhoJustMoved, incrementSeconds);
-      console.log('[Board] Increment applied, clocks now:', { whiteMs: clock.whiteMs, blackMs: clock.blackMs });
+      log('[Board] Increment applied, clocks now:', { whiteMs: clock.whiteMs, blackMs: clock.blackMs });
     } else {
-      console.log('[Board] ❌ NOT applying increment');
+      log('[Board] ❌ NOT applying increment');
     }
 
     if (isFriend) {

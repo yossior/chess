@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { io } from "socket.io-client";
+import { log } from "../utils/debug";
 
 /**
  * useOnlineGame manages a socket connection and provides:
@@ -81,7 +82,7 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
     
     keysToRemove.forEach(key => localStorage.removeItem(key));
     if (keysToRemove.length > 0) {
-      console.log("🧹 Cleared old game data from localStorage:", keysToRemove);
+      log("🧹 Cleared old game data from localStorage:", keysToRemove);
     }
   };
 
@@ -125,7 +126,7 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
     if (socket && socket.connected) {
       gameIdsToLeave.forEach(gid => {
         socket.emit("leaveGame", { gameId: gid });
-        console.log("👋 Left game:", gid);
+        log("👋 Left game:", gid);
       });
     }
     
@@ -152,10 +153,10 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
     // But we still need to set up event handlers each time
     let socket = socketRef.current;
     const isReusingSocket = socket?.connected;
-    console.log('[Socket] useEffect start ts:', Date.now());
+    log('[Socket] useEffect start ts:', Date.now());
     
     if (isReusingSocket) {
-      console.log("♻️ Reusing existing socket connection:", socket.id, 'ts:', Date.now());
+      log("♻️ Reusing existing socket connection:", socket.id, 'ts:', Date.now());
       setIsConnected(true);
     } else {
       // Close any old disconnected socket (defensive, useful for HMR)
@@ -163,7 +164,7 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
         try { socket.close(); } catch (e) { console.warn('socket close error', e); }
       }
 
-      console.log('[Socket] creating IO socket at ts:', Date.now());
+      log('[Socket] creating IO socket at ts:', Date.now());
       // Connect to same origin (no hardcoded host) so it works on Render and locally
       socket = io(undefined, {
         reconnection: true,
@@ -177,7 +178,7 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
     }
 
     socket.on("connect", () => {
-      console.log("✅ Socket connected:", socket.id);
+      log("✅ Socket connected:", socket.id);
       setIsConnected(true);
       socket.emit("sync_start", { t1_client: Date.now() });
     });
@@ -188,7 +189,7 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
     });
 
     socket.on("disconnect", (reason) => {
-      console.log("❌ Socket disconnected", reason);
+      log("❌ Socket disconnected", reason);
       setIsConnected(false);
     });
 
@@ -199,7 +200,7 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
 
     // server events
     socket.on("waitingForOpponent", ({ gameId, color, whiteMs, blackMs, incrementMs }) => {
-      console.log("waiting for opponent", gameId, "assigned color:", color);
+      log("waiting for opponent", gameId, "assigned color:", color);
       setWaiting(true);
       setGameId(gameId);
       gameIdRef.current = gameId;
@@ -220,13 +221,13 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
           mode: 'friend'
         };
         localStorage.setItem(`chess_game_${gameId}`, JSON.stringify(gameSettings));
-        console.log("Stored game settings for waiting game", gameId, gameSettings);
+        log("Stored game settings for waiting game", gameId, gameSettings);
       }
     });
 
     socket.on("gameStarted", ({ gameId, color, fen, turn, whiteMs, blackMs, incrementMs, serverTime, history, movesInTurn, isCompleted, gameResult, winner }) => {
-      console.log("game started", gameId, color, "completed:", isCompleted);
-      console.log('[Online] gameStarted - clock times:', { whiteMs, blackMs, turn });
+      log("game started", gameId, color, "completed:", isCompleted);
+      log('[Online] gameStarted - clock times:', { whiteMs, blackMs, turn });
       
       // Clear old games but keep this one (since we are joining as a player)
       clearOldGames(gameId);
@@ -266,7 +267,7 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
       // Sync clock state from server - DON'T start clock yet, wait for first move
       const { clock: currentClock, setChessPosition: scp, setMoveHistory: smh, setHistoryIndex: shi, setTurn: st, setMovesInTurn: smit } = propsRef.current;
       if (currentClock?.syncFromServer) {
-        console.log('[Online] Calling syncFromServer with startClock=false');
+        log('[Online] Calling syncFromServer with startClock=false');
         currentClock.syncFromServer(
           typeof whiteMs === 'number' ? whiteMs : initialTime * 1000,
           typeof blackMs === 'number' ? blackMs : initialTime * 1000,
@@ -298,7 +299,7 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
     });
 
     socket.on("spectatorJoined", ({ gameId, fen, turn, whiteMs, blackMs, incrementMs, serverTime, history, isCompleted, movesInTurn, gameResult, winner, whitePlayer, blackPlayer, isUnbalanced: serverIsUnbalanced }) => {
-      console.log("joined as spectator", gameId, "fen:", fen, "history length:", history?.length, "isCompleted:", isCompleted);
+      log("joined as spectator", gameId, "fen:", fen, "history length:", history?.length, "isCompleted:", isCompleted);
       
       // Clear all active game IDs from localStorage when spectating
       clearOldGames();
@@ -364,8 +365,8 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
     });
 
     socket.on("moveMade", ({ move, fen, turn, movesInTurn, whiteMs, blackMs, serverTime }) => {
-      console.log("move made", move.san);
-      console.log('[Online] moveMade - clock times:', { whiteMs, blackMs, turn });
+      log("move made", move.san);
+      log('[Online] moveMade - clock times:', { whiteMs, blackMs, turn });
       const { setChessPosition: scp, setMoveHistory: smh, setHistoryIndex: shi, setTurn: st, setMovesInTurn: smit, clock: c } = propsRef.current;
       
       if (!fen) return;
@@ -393,7 +394,7 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
 
       // Sync clock state from server after move (includes starting the clock)
       if (c?.syncFromServer) {
-        console.log('[Online] Calling syncFromServer with startClock=true on moveMade');
+        log('[Online] Calling syncFromServer with startClock=true on moveMade');
         c.syncFromServer(whiteMs, blackMs, turn, { startClock: true, serverTime });
       }
     });
@@ -409,15 +410,15 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
     });
 
     socket.on("gameOver", ({ reason, winner }) => {
-      console.log("[gameOver] Socket event received:", { reason, winner });
+      log("[gameOver] Socket event received:", { reason, winner });
       
       const { onGameOver: callback, clock: c } = propsRef.current;
-      console.log("[gameOver] callback type:", typeof callback);
+      log("[gameOver] callback type:", typeof callback);
       if (callback) {
-        console.log("[gameOver] Calling callback...");
+        log("[gameOver] Calling callback...");
         try {
           callback({ reason, winner });
-          console.log("[gameOver] Callback executed successfully");
+          log("[gameOver] Callback executed successfully");
         } catch (error) {
           console.error("[gameOver] Error calling callback:", error);
         }
@@ -450,23 +451,23 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
 
     // Draw offer events
     socket.on("drawOffered", ({ from }) => {
-      console.log("Draw offered by:", from);
+      log("Draw offered by:", from);
       setDrawOffer({ from });
     });
 
     socket.on("drawOfferSent", () => {
-      console.log("Draw offer sent successfully");
+      log("Draw offer sent successfully");
       setDrawOfferSent(true);
     });
 
     socket.on("drawDeclined", () => {
-      console.log("Draw offer was declined");
+      log("Draw offer was declined");
       setDrawOfferSent(false);
     });
 
     // Cleanup: remove listeners and optionally close socket
     return () => {
-      console.log("🧹 useOnlineGame cleanup");
+      log("🧹 useOnlineGame cleanup");
       
       // Remove all listeners we added to prevent duplicates on remount
       socket.off("connect");
@@ -488,7 +489,7 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
       setTimeout(() => {
         // Only close if this socket is still the current one (wasn't replaced by remount)
         if (socketRef.current === socket && !socket.connected) {
-          console.log("🧹 useOnlineGame: closing stale socket");
+          log("🧹 useOnlineGame: closing stale socket");
           try {
             socket.close();
           } catch (e) {
@@ -517,7 +518,7 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
     // Clear old game data before starting a new search
     clearOldGames();
     
-    console.log("🔍 Finding game...");
+    log("🔍 Finding game...");
     socket.emit("findGame", { userId });
   }, []);
 
@@ -531,7 +532,7 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
     // Clear old game data before joining a new specific game, preserving the current one
     clearOldGames(gameIdToJoin);
 
-    console.log("🔗 Joining specific game:", gameIdToJoin, "with", timeMinutes, "min +", incrementSeconds, "sec", "color:", playerColor);
+    log("🔗 Joining specific game:", gameIdToJoin, "with", timeMinutes, "min +", incrementSeconds, "sec", "color:", playerColor);
     socket.emit("joinGame", { gameId: gameIdToJoin, userId, timeMinutes, incrementSeconds, playerColor });
   }, []);
 
@@ -551,11 +552,11 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
     
     // Prevent duplicate resign calls
     if (hasResignedRef.current) {
-      console.log('[resign] Already resigned, ignoring duplicate call');
+      log('[resign] Already resigned, ignoring duplicate call');
       return;
     }
     
-    console.log('[resign] Debug:', { 
+    log('[resign] Debug:', { 
       hasSocket: !!socket, 
       isConnected: socket?.connected, 
       gameId: currentGameId 
@@ -610,7 +611,7 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
   const disconnect = useCallback(() => {
     const socket = socketRef.current;
     if (socket) {
-      console.log('🧹 Manual disconnect called');
+      log('🧹 Manual disconnect called');
       try {
         socket.close();
       } catch (e) {
@@ -633,12 +634,14 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
     setError(null);
   }, []);
 
-  // Bot game tracking methods - send game state to server for disconnect handling
-  const notifyBotGameStarted = useCallback((gameId, skillLevel, playerColor, isUnbalanced) => {
+  // Bot game tracking methods - send game state to server for DB persistence on completion
+  const notifyBotGameStarted = useCallback((gameId, playerColor, isUnbalanced) => {
     const socket = socketRef.current;
     if (socket && socket.connected) {
-      socket.emit('botGameStarted', { gameId, skillLevel, playerColor, isUnbalanced });
-      console.log('[Socket] Bot game started:', gameId);
+      socket.emit('botGameStarted', { gameId, playerColor, isUnbalanced });
+      log('[Socket] Bot game started:', gameId);
+    } else {
+      log('[Socket] Bot game started FAILED - not connected:', gameId, 'socket:', !!socket, 'connected:', socket?.connected);
     }
   }, []);
 
@@ -649,11 +652,13 @@ export function useOnlineGame(chessGameRef, setChessPosition, setMoveHistory, se
     }
   }, []);
 
-  const notifyBotGameEnded = useCallback((gameId) => {
+  const notifyBotGameEnded = useCallback((gameId, result = null, winner = null) => {
     const socket = socketRef.current;
     if (socket && socket.connected) {
-      socket.emit('botGameEnded', { gameId });
-      console.log('[Socket] Bot game ended:', gameId);
+      socket.emit('botGameEnded', { gameId, result, winner });
+      log('[Socket] Bot game ended:', gameId, result, winner);
+    } else {
+      log('[Socket] Bot game ended FAILED - not connected:', gameId, 'socket:', !!socket, 'connected:', socket?.connected);
     }
   }, []);
 

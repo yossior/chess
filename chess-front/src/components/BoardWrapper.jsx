@@ -14,7 +14,7 @@ import { useOnlineGame } from "../hooks/useOnlineGame";
 import ClockView from "./ClockView";
 import useClock from "../hooks/useClock";
 import MoveHistory from "./MoveHistory";
-import { logBotGameStarted, logGameCompleted } from "../utils/stats";
+import { log } from "../utils/debug";
 
 export default function BoardWrapper() {
     // Track which game ID we've already attempted to join
@@ -65,21 +65,21 @@ export default function BoardWrapper() {
 
     // Check URL for game ID on mount and restore active games
     useEffect(() => {
-        console.log('[BoardWrapper] Mount effect running');
+        log('[BoardWrapper] Mount effect running');
         
         // First priority: check if there's a game ID in the URL (shared link takes precedence)
-        const pathMatch = window.location.pathname.match(/^\/game\/([a-z0-9]+)$/);
+        const pathMatch = window.location.pathname.match(/^\/game\/([a-z0-9_]+)$/);
         const gameIdFromUrl = pathMatch ? pathMatch[1] : null;
         
         if (gameIdFromUrl) {
             // Joining via shared link (URL takes priority over localStorage)
-            console.log('[BoardWrapper] Found game ID in URL:', gameIdFromUrl, 'ts:', Date.now());
+            log('[BoardWrapper] Found game ID in URL:', gameIdFromUrl, 'ts:', Date.now());
             setMode('friend');
             setShowPlayFriend(false);
             setPendingGameId(gameIdFromUrl);
             setGameStarted(true);
             // timestamp for diagnostics: when mount discovered the gameId
-            console.log('[BoardWrapper] mount discovery timestamp:', Date.now());
+            log('[BoardWrapper] mount discovery timestamp:', Date.now());
             return; // Don't check localStorage
         }
 
@@ -90,7 +90,7 @@ export default function BoardWrapper() {
             // Resume active game - this takes priority over URL
             try {
                 const gameInfo = JSON.parse(activeGame);
-                console.log('[BoardWrapper] Restoring active friend game:', gameInfo);
+                log('[BoardWrapper] Restoring active friend game:', gameInfo);
                 setMode('friend');
                 setShowPlayFriend(false);
                 // For resumed games, use pendingGameId so server can use stored color for reconnection matching
@@ -104,13 +104,13 @@ export default function BoardWrapper() {
         }
 
         // Bot games are NOT persisted - page reload resets the game
-        console.log('[BoardWrapper] No active game to restore');
+        log('[BoardWrapper] No active game to restore');
     }, []);
 
     // Join game when online connection is ready and we have a pending game ID
     // Also restore bot games from localStorage
     useEffect(() => {
-        console.log('[BoardWrapper] Join effect - pendingGameId:', pendingGameId, 'pendingGameSettings:', pendingGameSettings?.gameId, 'connected:', online?.isConnected);
+        log('[BoardWrapper] Join effect - pendingGameId:', pendingGameId, 'pendingGameSettings:', pendingGameSettings?.gameId, 'connected:', online?.isConnected);
         
         // NOTE: We do NOT wait for user to load before joining friend games.
         // The user ID is optional - games work for guests too.
@@ -120,7 +120,7 @@ export default function BoardWrapper() {
         if (pendingGameId && online?.isConnected) {
             // Only attempt the join once per game ID
             if (joinAttemptedRef.current === pendingGameId) {
-                console.log('[BoardWrapper] Already attempted to join game', pendingGameId, ', skipping');
+                log('[BoardWrapper] Already attempted to join game', pendingGameId, ', skipping');
                 return;
             }
             
@@ -137,7 +137,7 @@ export default function BoardWrapper() {
                 timeMinutes = pendingGameSettings.timeMinutes;
                 incrementSeconds = pendingGameSettings.incrementSeconds;
                 isCreator = true; // We created this game
-                console.log('[BoardWrapper] Using pending settings (creator): color=' + color + ', time=' + timeMinutes);
+                log('[BoardWrapper] Using pending settings (creator): color=' + color + ', time=' + timeMinutes);
             } else {
                 // We're NOT the creator - joining via URL
                 // Check if this is a resumed active game (refresh recovery)
@@ -179,9 +179,9 @@ export default function BoardWrapper() {
             const joinTimeMinutes = isCreator ? timeMinutes : null;
             const joinIncrementSeconds = isCreator ? incrementSeconds : null;
             
-            console.log('[BoardWrapper] Joining game:', pendingGameId, 'color:', color, 'time:', joinTimeMinutes, 'isCreator:', isCreator, 'ts:', Date.now());
+            log('[BoardWrapper] Joining game:', pendingGameId, 'color:', color, 'time:', joinTimeMinutes, 'isCreator:', isCreator, 'ts:', Date.now());
             // diagnostic: timestamp when issuing join request
-            console.log('[BoardWrapper] join request timestamp:', Date.now());
+            log('[BoardWrapper] join request timestamp:', Date.now());
             online.joinSpecificGame(pendingGameId, null, joinTimeMinutes, joinIncrementSeconds, color);
             // NOTE: Don't clear pendingGameId here - it will be cleared when gameStarted/spectatorJoined is received
             return;
@@ -189,15 +189,15 @@ export default function BoardWrapper() {
 
         // BOT GAME PATH: Restore bot game from localStorage
         if (pendingGameSettings?.isBotGame && chess?.chessGame) {
-            console.log('[BoardWrapper] Restoring bot game state...');
+            log('[BoardWrapper] Restoring bot game state...');
             try {
                 // Load the FEN position
-                console.log('[BoardWrapper] Loading FEN:', pendingGameSettings.fen);
+                log('[BoardWrapper] Loading FEN:', pendingGameSettings.fen);
                 chess.chessGame.load(pendingGameSettings.fen);
                 chess.setChessPosition(pendingGameSettings.fen);
                 
                 // Restore move history
-                console.log('[BoardWrapper] Restoring', pendingGameSettings.moveHistory?.length || 0, 'moves');
+                log('[BoardWrapper] Restoring', pendingGameSettings.moveHistory?.length || 0, 'moves');
                 chess.setMoveHistory(pendingGameSettings.moveHistory || []);
                 chess.setHistoryIndex(null);
                 
@@ -211,7 +211,7 @@ export default function BoardWrapper() {
                 
                 // Restore clock state if timed game
                 if (isBotGameTimed && clock?.syncFromServer && pendingGameSettings.whiteMs !== undefined) {
-                    console.log('[BoardWrapper] Syncing clock for timed game');
+                    log('[BoardWrapper] Syncing clock for timed game');
                     clock.syncFromServer(
                         pendingGameSettings.whiteMs,
                         pendingGameSettings.blackMs,
@@ -220,7 +220,7 @@ export default function BoardWrapper() {
                     );
                 }
                 
-                console.log('[BoardWrapper] Bot game state restored successfully');
+                log('[BoardWrapper] Bot game state restored successfully');
             } catch (e) {
                 console.error('[BoardWrapper] Failed to restore bot game state:', e);
             }
@@ -231,7 +231,7 @@ export default function BoardWrapper() {
     // Clear pendingGameId and reset join tracking when the game response is received
     useEffect(() => {
         if (pendingGameId && online?.gameId && online?.gameId === pendingGameId) {
-            console.log('[BoardWrapper] Game response received, clearing pending state');
+            log('[BoardWrapper] Game response received, clearing pending state');
             setPendingGameId(null);
             setPendingGameSettings(null);
             joinAttemptedRef.current = null;
@@ -241,7 +241,7 @@ export default function BoardWrapper() {
     // Handle game not found errors - reset state and show message
     useEffect(() => {
         if (online?.error?.code === 'GAME_NOT_FOUND') {
-            console.log('[BoardWrapper] Game not found error, resetting state');
+            log('[BoardWrapper] Game not found error, resetting state');
             setPendingGameId(null);
             setPendingGameSettings(null);
             joinAttemptedRef.current = null;
@@ -260,7 +260,7 @@ export default function BoardWrapper() {
     useEffect(() => {
         // Game shows as started in friend mode when we have a game ID (waiting or playing)
         if (mode === 'friend' && online?.gameId) {
-            console.log('[BoardWrapper] Setting gameStarted=true for friend mode');
+            log('[BoardWrapper] Setting gameStarted=true for friend mode');
             setGameStarted(true);
         }
     }, [mode, online?.gameId]);
@@ -286,7 +286,7 @@ export default function BoardWrapper() {
         
         // Check if it's actually the engine's turn (white's turn when player is black)
         if (chess.chessGame.turn() === 'w') {
-            console.log('[BoardWrapper] Triggering initial engine move (Player is Black)');
+            log('[BoardWrapper] Triggering initial engine move (Player is Black)');
             const timer = setTimeout(() => {
                 if (marseillais?.makeEngineMove) {
                     marseillais.makeEngineMove();
@@ -339,20 +339,30 @@ export default function BoardWrapper() {
         return () => window.removeEventListener("keydown", handleKeyDown);
     }, [chess.moveHistory]);
 
-    // Sync bot game moves to server for disconnect tracking
+    // Sync bot game moves to server for tracking
+    // Also auto-create a game ID when first move is made in local mode
     useEffect(() => {
-        if (mode !== 'local' || !currentBotGameId) return;
+        if (mode !== 'local') return;
         
-        // Use moveHistory state instead of chess.js history() because
-        // chess.js history is cleared when load(fen) is called during game restoration
         const moves = (chess.moveHistory || []).map(m => m.san);
+        if (moves.length === 0) return;
+        
         const fen = chess.chessGameRef.current?.fen() || '';
         
-        // Notify server of the current game state (only if moves have been made)
-        if (moves.length > 0) {
+        // Auto-create a game ID if we don't have one yet (user started playing without modal)
+        if (!currentBotGameId && online?.isConnected) {
+            const gameId = 'bot_' + Math.random().toString(36).substring(2, 11) + '_' + Date.now().toString(36);
+            setCurrentBotGameId(gameId);
+            online.notifyBotGameStarted(gameId, playerColor, isUnbalanced);
+            online.notifyBotGameMove(gameId, moves, fen);
+            return;
+        }
+        
+        // Notify server of the current game state
+        if (currentBotGameId) {
             online.notifyBotGameMove(currentBotGameId, moves, fen);
         }
-    }, [chess.moveHistory, mode, currentBotGameId, online]);
+    }, [chess.moveHistory, mode, currentBotGameId, online, playerColor, isUnbalanced]);
 
     // Clock flag -> treat as game over (timeout)
     useEffect(() => {
@@ -372,12 +382,8 @@ export default function BoardWrapper() {
         
         // Log timeout for bot games (friend games are logged server-side)
         if (mode === 'local') {
-            logGameCompleted(currentBotGameId, 'timeout', winner, true, {
-                moves: chess.moveHistory.map(m => m.san),
-                fen: chess.chessGame.fen()
-            });
-            // Notify server that bot game ended (server can stop tracking it)
-            online.notifyBotGameEnded(currentBotGameId);
+            // Notify server that bot game ended with result
+            online.notifyBotGameEnded(currentBotGameId, 'timeout', winner);
             setCurrentBotGameId(null);
         }
         
@@ -445,12 +451,10 @@ export default function BoardWrapper() {
             clock.start('w');
         }
         
-        // Log bot game started for analytics and capture the game ID
-        logBotGameStarted(settings.skillLevel, shortColor, settings.isUnbalanced).then(gameId => {
-            setCurrentBotGameId(gameId);
-            // Notify server about bot game start for disconnect tracking
-            online.notifyBotGameStarted(gameId, settings.skillLevel, shortColor, settings.isUnbalanced);
-        });
+        // Generate a game ID and notify server for tracking
+        const gameId = 'bot_' + Math.random().toString(36).substring(2, 11) + '_' + Date.now().toString(36);
+        setCurrentBotGameId(gameId);
+        online.notifyBotGameStarted(gameId, shortColor, settings.isUnbalanced);
     }
 
     function handleStartFriendGame(settings) {
@@ -485,7 +489,7 @@ export default function BoardWrapper() {
             isUnbalanced: settings.isUnbalanced
         };
         localStorage.setItem(`chess_game_${settings.gameId}`, JSON.stringify(playerInfo));
-        console.log('[BoardWrapper] Stored player info for reconnection:', playerInfo);
+        log('[BoardWrapper] Stored player info for reconnection:', playerInfo);
         
         // Reset the game completely
         chess.resetGame();
@@ -514,14 +518,8 @@ export default function BoardWrapper() {
             setGameOverInfo({ reason: 'resignation', winner });
             clock.pause?.();
             
-            // Log bot game resignation for analytics with full game data
-            logGameCompleted(currentBotGameId, 'resignation', winner, true, {
-                moves: chess.moveHistory.map(m => m.san),
-                fen: chess.chessGame.fen()
-            });
-            
-            // Notify server that bot game ended (server can stop tracking it)
-            online.notifyBotGameEnded(currentBotGameId);
+            // Notify server that bot game ended with result
+            online.notifyBotGameEnded(currentBotGameId, 'resignation', winner);
             
             // Clear bot game ID
             setCurrentBotGameId(null);
@@ -566,14 +564,8 @@ export default function BoardWrapper() {
             setGameOverInfo({ reason, winner });
             clock.pause?.();
             
-            // Log bot game completion for analytics with full game data
-            logGameCompleted(currentBotGameId, reason, winner, true, {
-                moves: chess.moveHistory.map(m => m.san),
-                fen: chess.chessGame.fen()
-            });
-            
-            // Notify server that bot game ended (server can stop tracking it)
-            online.notifyBotGameEnded(currentBotGameId);
+            // Notify server that bot game ended with result
+            online.notifyBotGameEnded(currentBotGameId, reason, winner);
             
             // Clear the bot game ID since it's finished
             setCurrentBotGameId(null);

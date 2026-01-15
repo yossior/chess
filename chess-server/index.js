@@ -7,7 +7,7 @@ const path = require("path");
 require("dotenv").config();
 
 const { registerSocketHandlers } = require("./handlers/socket.handler");
-const statsRoutes = require("./routes/stats.route");
+const visitRoutes = require("./routes/visit.route");
 // Admin initialization disabled
 // const { initializeAdminUser } = require("./controllers/user.controller");
 
@@ -43,7 +43,9 @@ app.use(express.static(distDir));
 // ============================================
 // ROUTES
 // ============================================
-app.use("/api/stats", statsRoutes);
+
+// Visit tracking
+app.use("/api/visit", visitRoutes);
 
 // Health check
 app.get("/health", (req, res) => {

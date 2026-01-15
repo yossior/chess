@@ -10,7 +10,19 @@
  * Uses minimax with alpha-beta pruning
  */
 
-// Engine loaded
+// ============================================================================
+// DEBUG LOGGING
+// ============================================================================
+let ENGINE_DEBUG = typeof process !== 'undefined' && process.env?.NODE_ENV === 'development' ||
+                   (typeof location !== 'undefined' && location.hostname === 'localhost');
+
+export function setEngineDebug(enabled) {
+  ENGINE_DEBUG = enabled;
+}
+
+function log(...args) {
+  if (ENGINE_DEBUG) console.log(...args);
+}
 
 // ============================================================================
 // CONSTANTS
@@ -38,7 +50,9 @@ export const WHITE = 1;
 export const BLACK = -1;
 
 // Material values
-const PIECE_VALUES = new Int16Array([0, 100, 320, 330, 500, 900, 20000]);
+// MARSEILLAIS CHESS ADJUSTMENT: Pawns devalued to 80cp because spending a full
+// turn (2 moves) to win a pawn while opponent develops is a losing trade
+const PIECE_VALUES = new Int16Array([0, 80, 320, 330, 500, 900, 20000]);
 
 // 10x12 mailbox - maps 64 squares to 120 array
 // The padding allows easy off-board detection for sliding pieces
@@ -72,14 +86,6 @@ const IS_SLIDING = [false, false, false, true, true, true, false]; // 0=empty, 1
 // ============================================================================
 // ZOBRIST HASHING
 // ============================================================================
-
-// Use BigInt for 64-bit random numbers (better hash distribution)
-function randomBigInt() {
-  // Generate 64-bit random number using two 32-bit randoms
-  const high = Math.floor(Math.random() * 0xFFFFFFFF);
-  const low = Math.floor(Math.random() * 0xFFFFFFFF);
-  return BigInt(high) << 32n | BigInt(low);
-}
 
 // Seed the random generator for reproducibility
 let seed = 1234567890;
@@ -119,151 +125,20 @@ for (let i = 0; i < 9; i++) {
 const ZOBRIST_SIDE = seededRandomBigInt();
 
 // ============================================================================
-// TRANSPOSITION TABLE
+// MOVE ORDERING TABLES
 // ============================================================================
 
-const TT_EXACT = 0;
-const TT_ALPHA = 1; // Upper bound (failed low)
-const TT_BETA = 2;  // Lower bound (failed high)
-
-class TranspositionTable {
-  constructor(sizeMB = 64) {
-    // Each entry: ~40 bytes (hash, depth, score, flag, bestMove)
-    this.size = Math.floor((sizeMB * 1024 * 1024) / 40);
-    this.entries = new Map();
-    this.hits = 0;
-    this.misses = 0;
-  }
-  
-  clear() {
-    this.entries.clear();
-    this.hits = 0;
-    this.misses = 0;
-  }
-  
-  // Use only lower 48 bits as key to save memory
-  keyFor(hash) {
-    return hash & 0xFFFFFFFFFFFFn;
-  }
-  
-  store(hash, depth, score, flag, bestMove) {
-    const key = this.keyFor(hash);
-    const existing = this.entries.get(key);
-    
-    // Replace if: no entry, or deeper search, or same depth with exact score
-    if (!existing || depth >= existing.depth || (depth === existing.depth && flag === TT_EXACT)) {
-      this.entries.set(key, { hash, depth, score, flag, bestMove });
-      
-      // Limit size by removing oldest entries if too large
-      if (this.entries.size > this.size) {
-        const firstKey = this.entries.keys().next().value;
-        this.entries.delete(firstKey);
-      }
-    }
-  }
-  
-  probe(hash, depth, alpha, beta) {
-    const key = this.keyFor(hash);
-    const entry = this.entries.get(key);
-    
-    if (!entry || entry.hash !== hash) {
-      this.misses++;
-      return null;
-    }
-    
-    this.hits++;
-    
-    // Return best move even if depth is insufficient
-    const result = { bestMove: entry.bestMove, score: null };
-    
-    // Only use score if depth is sufficient
-    if (entry.depth >= depth) {
-      if (entry.flag === TT_EXACT) {
-        result.score = entry.score;
-      } else if (entry.flag === TT_ALPHA && entry.score <= alpha) {
-        result.score = entry.score;
-      } else if (entry.flag === TT_BETA && entry.score >= beta) {
-        result.score = entry.score;
-      }
-    }
-    
-    return result;
-  }
-  
-  getBestMove(hash) {
-    const key = this.keyFor(hash);
-    const entry = this.entries.get(key);
-    return (entry && entry.hash === hash) ? entry.bestMove : null;
-  }
-}
-
-// Global transposition table
-const tt = new TranspositionTable(64);
-
-// ============================================================================
-// KILLER MOVES
-// ============================================================================
-
-// Store 2 killer moves per ply (moves that caused beta cutoffs)
+// Killer moves per ply (moves that caused beta cutoffs) - used in move ordering
 const MAX_PLY = 64;
 const killerMoves = [];
 for (let i = 0; i < MAX_PLY; i++) {
   killerMoves[i] = [0, 0];
 }
 
-function clearKillers() {
-  for (let i = 0; i < MAX_PLY; i++) {
-    killerMoves[i][0] = 0;
-    killerMoves[i][1] = 0;
-  }
-}
-
-function storeKiller(ply, move) {
-  if (ply >= MAX_PLY) return;
-  // Don't store captures as killers
-  if (getMoveCaptured(move) !== 0) return;
-  
-  // Shift killers
-  if (killerMoves[ply][0] !== move) {
-    killerMoves[ply][1] = killerMoves[ply][0];
-    killerMoves[ply][0] = move;
-  }
-}
-
-// ============================================================================
-// HISTORY HEURISTIC
-// ============================================================================
-
-// History table: [piece][toSquare] - indexed by piece type (1-6) and target square (0-63)
+// History table: [piece][toSquare] - used in move ordering
 const historyTable = [];
 for (let p = 0; p < 7; p++) {
   historyTable[p] = new Int32Array(64);
-}
-
-function clearHistory() {
-  for (let p = 0; p < 7; p++) {
-    historyTable[p].fill(0);
-  }
-}
-
-function updateHistory(state, move, depth) {
-  const from = getMoveFrom(move);
-  const to = getMoveTo(move);
-  const piece = Math.abs(state.board[from]);
-  const to64 = MAILBOX_120[to];
-  
-  if (piece > 0 && piece <= 6 && to64 >= 0) {
-    // Increase history score (with aging to prevent overflow)
-    historyTable[piece][to64] += depth * depth;
-    if (historyTable[piece][to64] > 1000000) {
-      // Age all history scores
-      for (let p = 1; p < 7; p++) {
-        for (let sq = 0; sq < 64; sq++) {
-          historyTable[p][sq] = Math.floor(historyTable[p][sq] / 2);
-        }
-      }
-    }
-  }
 }
 
 // ============================================================================
@@ -273,34 +148,34 @@ function updateHistory(state, move, depth) {
 const PST_PAWN = new Int16Array([
    0,  0,  0,  0,  0,  0,  0,  0,
   50, 50, 50, 50, 50, 50, 50, 50,
-  10, 10, 20, 30, 30, 20, 10, 10,
+  15, 15, 25, 35, 35, 25, 15, 15,
+  10, 10, 15, 30, 30, 15, 10, 10,
    5,  5, 10, 25, 25, 10,  5,  5,
-   0,  0,  0, 20, 20,  0,  0,  0,
-   5, -5,-10,  0,  0,-10, -5,  5,
-   5, 10, 10,-20,-20, 10, 10,  5,
+   0,  0,  0, 15, 15,  0,  0,  0,
+   5,  5,-30,-15,-15,-30,  5,  5,
    0,  0,  0,  0,  0,  0,  0,  0,
 ]);
 
 const PST_KNIGHT = new Int16Array([
   -50,-40,-30,-30,-30,-30,-40,-50,
-  -40,-20,  0,  0,  0,  0,-20,-40,
-  -30,  0, 10, 15, 15, 10,  0,-30,
-  -30,  5, 15, 20, 20, 15,  5,-30,
-  -30,  0, 15, 20, 20, 15,  0,-30,
-  -30,  5, 10, 15, 15, 10,  5,-30,
-  -40,-20,  0,  5,  5,  0,-20,-40,
-  -50,-40,-30,-30,-30,-30,-40,-50,
+  -40,-20, 10, 10, 10, 10,-20,-40,
+  -30, 10, 25, 30, 30, 25, 10,-30,
+  -30, 15, 30, 35, 35, 30, 15,-30,
+  -30, 10, 30, 35, 35, 30, 10,-30,
+  -30, 15, 25, 30, 30, 25, 15,-30,
+  -40,-20,  5, 10, 10,  5,-20,-40,
+  -50,-40,-20,-30,-30,-20,-40,-50,
 ]);
 
 const PST_BISHOP = new Int16Array([
   -20,-10,-10,-10,-10,-10,-10,-20,
-  -10,  0,  0,  0,  0,  0,  0,-10,
-  -10,  0,  5, 10, 10,  5,  0,-10,
-  -10,  5,  5, 10, 10,  5,  5,-10,
-  -10,  0, 10, 10, 10, 10,  0,-10,
-  -10, 10, 10, 10, 10, 10, 10,-10,
   -10,  5,  0,  0,  0,  0,  5,-10,
-  -20,-10,-10,-10,-10,-10,-10,-20,
+  -10, 10, 10, 10, 10, 10, 10,-10,
+  -10,  0, 15, 15, 15, 15,  0,-10,
+  -10,  5, 15, 15, 15, 15,  5,-10,
+  -10,  0, 15, 10, 10, 15,  0,-10,
+  -10,  0,  0,  0,  0,  0,  0,-10,
+  -20,-10,-40,-10,-10,-40,-10,-20,
 ]);
 
 const PST_ROOK = new Int16Array([
@@ -315,25 +190,25 @@ const PST_ROOK = new Int16Array([
 ]);
 
 const PST_QUEEN = new Int16Array([
+  -30,-20,-20,-10,-10,-20,-20,-30,
   -20,-10,-10, -5, -5,-10,-10,-20,
+  -20,-10,  0,  0,  0,  0,-10,-20,
+  -10, -5,  0,  0,  0,  0, -5,-10,
+  -10, -5,  0,  0,  0,  0, -5,-10,
   -10,  0,  0,  0,  0,  0,  0,-10,
-  -10,  0,  5,  5,  5,  5,  0,-10,
-   -5,  0,  5,  5,  5,  5,  0, -5,
-    0,  0,  5,  5,  5,  5,  0, -5,
-  -10,  5,  5,  5,  5,  5,  0,-10,
-  -10,  0,  5,  0,  0,  0,  0,-10,
-  -20,-10,-10, -5, -5,-10,-10,-20,
+   -5,  0,  0,  0,  0,  0,  0, -5,
+  -10, -5, -5,  0,  0, -5, -5,-10,
 ]);
 
 const PST_KING = new Int16Array([
-  -30,-40,-40,-50,-50,-40,-40,-30,
-  -30,-40,-40,-50,-50,-40,-40,-30,
-  -30,-40,-40,-50,-50,-40,-40,-30,
-  -30,-40,-40,-50,-50,-40,-40,-30,
-  -20,-30,-30,-40,-40,-30,-30,-20,
-  -10,-20,-20,-20,-20,-20,-20,-10,
-   20, 20,  0,  0,  0,  0, 20, 20,
-   20, 30, 10,  0,  0, 10, 30, 20,
+  -50,-50,-50,-50,-50,-50,-50,-50,
+  -50,-50,-50,-50,-50,-50,-50,-50,
+  -50,-50,-50,-50,-50,-50,-50,-50,
+  -40,-40,-40,-50,-50,-40,-40,-40,
+  -30,-30,-30,-40,-40,-30,-30,-30,
+  -20,-20,-20,-20,-20,-20,-20,-20,
+   10, 20, -5,-10,-10, -5, 20, 10,
+   15, 40, 25,  0,  0, 10, 40, 15,
 ]);
 
 const PST = [null, PST_PAWN, PST_KNIGHT, PST_BISHOP, PST_ROOK, PST_QUEEN, PST_KING];
@@ -426,9 +301,6 @@ export class GameState {
     
     // Compute initial Zobrist hash
     this.zobristHash = this.computeZobristHash();
-    
-    // DEBUG_OPT: Verify hash is non-zero
-    if (DEBUG_OPT) console.log('[DEBUG_OPT] Initial Zobrist hash:', this.zobristHash.toString(16));
     
     // Record initial position
     const initialHash = this.getPositionHash();
@@ -552,9 +424,6 @@ export class GameState {
     
     // Recompute Zobrist hash for loaded position
     this.zobristHash = this.computeZobristHash();
-    
-    // DEBUG_OPT: Log loaded position hash
-    if (DEBUG_OPT) console.log('[DEBUG_OPT] loadFen Zobrist hash:', this.zobristHash.toString(16), 'side:', this.sideToMove === WHITE ? 'white' : 'black');
   }
   
   /**
@@ -592,16 +461,6 @@ export function encodeMove(from, to, captured = 0, promotion = 0, flags = 0) {
          (((captured + 6) & 0xF) << 14) |
          ((promotion & 0xF) << 18) |
          ((flags & 0x3) << 22);
-}
-
-export function decodeMove(move) {
-  return {
-    from: move & 0x7F,
-    to: (move >> 7) & 0x7F,
-    captured: ((move >> 14) & 0xF) - 6,
-    promotion: (move >> 18) & 0xF,
-    flags: (move >> 22) & 0x3,
-  };
 }
 
 export function getMoveFrom(move) { return move & 0x7F; }
@@ -689,6 +548,168 @@ export function isSquareAttacked(state, sq, byColor) {
 export function isInCheck(state, color) {
   const kingSq = color === WHITE ? state.whiteKingSq : state.blackKingSq;
   return isSquareAttacked(state, kingSq, -color);
+}
+
+// ============================================================================
+// STATIC EXCHANGE EVALUATION (SEE)
+// ============================================================================
+
+/**
+ * Static Exchange Evaluation - evaluates the material outcome of a capture sequence
+ * Returns positive if the capture wins material, 0 if equal, negative if loses
+ * @param {GameState} state - Current game state
+ * @param {number} move - The capture move to evaluate
+ */
+export function staticExchangeEval(state, move) {
+  const from = getMoveFrom(move);
+  const to = getMoveTo(move);
+  const captured = getMoveCaptured(move);
+  const promotion = getMovePromotion(move);
+  
+  // Not a capture - SEE is 0
+  if (captured === 0) return 0;
+  
+  const board = state.board;
+  const attacker = Math.abs(board[from]);
+  const attackerColor = board[from] > 0 ? WHITE : BLACK;
+  
+  // Handle promotion - the promoted piece is what sits on the square
+  const pieceOnSquare = promotion !== 0 ? promotion : attacker;
+  
+  // Gain array: stores the material balance at each capture
+  const gain = [];
+  let depth = 0;
+  
+  // Initial capture value
+  gain[depth] = PIECE_VALUES[Math.abs(captured)];
+  
+  // Simulate the capture sequence
+  // We need to track which pieces have been "used" (removed from the board)
+  // Using a simple simulation with a copy of relevant state
+  
+  // Track occupied squares (piece values, 0 = empty after capture)
+  const tempBoard = new Int8Array(120);
+  tempBoard.set(board);
+  
+  // Make the initial capture
+  tempBoard[from] = EMPTY;
+  tempBoard[to] = pieceOnSquare * attackerColor;
+  
+  let currentColor = -attackerColor; // Opponent's turn to recapture
+  let currentPieceOnSquare = pieceOnSquare;
+  
+  // Keep capturing until no more attackers
+  while (true) {
+    depth++;
+    
+    // Find least valuable attacker for current color
+    const nextAttacker = getLeastValuableAttackerFromBoard(tempBoard, to, currentColor);
+    
+    if (!nextAttacker) break;
+    
+    // The gain at this depth is: value of piece on square - previous gain
+    // (negamax style: we gain what's there, opponent gained what they had)
+    gain[depth] = PIECE_VALUES[currentPieceOnSquare] - gain[depth - 1];
+    
+    // Prune if the best we can do is still losing
+    // max(-gain[d-1], gain[d]) < 0 means even with best play we lose
+    if (Math.max(-gain[depth - 1], gain[depth]) < 0) break;
+    
+    // Make the capture
+    tempBoard[nextAttacker.sq] = EMPTY;
+    currentPieceOnSquare = nextAttacker.piece;
+    tempBoard[to] = currentPieceOnSquare * currentColor;
+    
+    // Switch sides
+    currentColor = -currentColor;
+  }
+  
+  // Negamax the gain array to get final SEE value
+  while (depth > 1) {
+    depth--;
+    gain[depth] = -Math.max(-gain[depth], gain[depth + 1]);
+  }
+  
+  return gain[0];
+}
+
+/**
+ * Helper for SEE: get least valuable attacker from a temporary board state
+ */
+function getLeastValuableAttackerFromBoard(board, sq, byColor) {
+  let bestSq = -1;
+  let bestPiece = 7;
+  
+  // Check pawns first
+  const pawnDir = byColor === WHITE ? -10 : 10;
+  const pawn = byColor === WHITE ? W_PAWN : B_PAWN;
+  for (const sideDir of [-1, 1]) {
+    const from = sq + pawnDir + sideDir;
+    if (board[from] === pawn) {
+      return { sq: from, piece: W_PAWN };
+    }
+  }
+  
+  // Knights
+  for (const offset of KNIGHT_OFFSETS) {
+    const from = sq + offset;
+    const piece = board[from];
+    if (piece !== OFF_BOARD && piece * byColor === W_KNIGHT) {
+      return { sq: from, piece: W_KNIGHT };
+    }
+  }
+  
+  // Bishops and diagonal queens
+  for (const offset of BISHOP_OFFSETS) {
+    let from = sq + offset;
+    while (board[from] !== OFF_BOARD) {
+      const piece = board[from];
+      if (piece !== EMPTY) {
+        const absPiece = Math.abs(piece);
+        if (piece * byColor > 0 && (absPiece === W_BISHOP || absPiece === W_QUEEN)) {
+          if (absPiece < bestPiece) {
+            bestSq = from;
+            bestPiece = absPiece;
+          }
+        }
+        break;
+      }
+      from += offset;
+    }
+  }
+  if (bestPiece === W_BISHOP) return { sq: bestSq, piece: bestPiece };
+  
+  // Rooks and straight queens
+  for (const offset of ROOK_OFFSETS) {
+    let from = sq + offset;
+    while (board[from] !== OFF_BOARD) {
+      const piece = board[from];
+      if (piece !== EMPTY) {
+        const absPiece = Math.abs(piece);
+        if (piece * byColor > 0 && (absPiece === W_ROOK || absPiece === W_QUEEN)) {
+          if (absPiece < bestPiece) {
+            bestSq = from;
+            bestPiece = absPiece;
+          }
+        }
+        break;
+      }
+      from += offset;
+    }
+  }
+  if (bestPiece === W_ROOK) return { sq: bestSq, piece: bestPiece };
+  if (bestPiece === W_QUEEN) return { sq: bestSq, piece: bestPiece };
+  
+  // King
+  for (const offset of KING_OFFSETS) {
+    const from = sq + offset;
+    const piece = board[from];
+    if (piece !== OFF_BOARD && piece * byColor === W_KING) {
+      return { sq: from, piece: W_KING };
+    }
+  }
+  
+  return null;
 }
 
 // ============================================================================
@@ -1147,13 +1168,72 @@ export function undoMove(state, move, undoInfo) {
 // ============================================================================
 
 /**
+ * Find a piece on the board (returns 64-index or -1 if not found)
+ */
+function findPiece(board, piece) {
+  for (let sq64 = 0; sq64 < 64; sq64++) {
+    if (board[MAILBOX_64[sq64]] === piece) return sq64;
+  }
+  return -1;
+}
+
+/**
+ * Count legal moves for a side (simplified mobility calculation)
+ */
+function countMobility(state, forWhite) {
+  const color = forWhite ? WHITE : BLACK;
+  const moves = generateLegalMoves(state, color, false);
+  return moves.length;
+}
+
+/**
+ * Count pieces attacking squares near a king
+ */
+function countKingAttackers(state, kingSq, byWhite) {
+  const board = state.board;
+  let attackers = 0;
+  
+  // Check the 8 squares around the king + 2 knight jump squares
+  const nearKingOffsets = [-11, -10, -9, -1, 1, 9, 10, 11, -21, -19, -12, -8, 8, 12, 19, 21];
+  
+  for (const offset of nearKingOffsets) {
+    const sq = kingSq + offset;
+    const piece = board[sq];
+    if (piece === OFF_BOARD || piece === EMPTY) continue;
+    
+    const isWhitePiece = piece > 0;
+    if (isWhitePiece === byWhite) {
+      // Enemy piece near our king
+      const pieceType = Math.abs(piece);
+      if (pieceType >= 2 && pieceType <= 5) { // N, B, R, Q
+        attackers++;
+      }
+    }
+  }
+  return attackers;
+}
+
+/**
  * Static evaluation - ALWAYS from WHITE's perspective
- * Positive = good for WHITE, Negative = good for BLACK
+ * 
+ * MARSEILLAIS CHESS EVALUATION PRINCIPLES:
+ * 1. TEMPO > MATERIAL: A turn = 2 moves. Wasting moves to grab pawns is losing.
+ * 2. MOBILITY MATTERS: More legal moves = more double-threat options.
+ * 3. DEVELOPMENT IS CRITICAL: Each undeveloped piece = missed opportunity.
+ * 4. BISHOP PAIR: Retaining both bishops provides crucial mobility.
+ * 5. KING SAFETY: Exposed king can be mated in one double-turn.
  */
 export function evaluate(state) {
   const board = state.board;
   let score = 0;
+  let whiteMaterial = 0;
+  let blackMaterial = 0;
+  let whiteBishops = 0;
+  let blackBishops = 0;
   
+  // =========================================================================
+  // PHASE 1: Material + PST
+  // =========================================================================
   for (let sq64 = 0; sq64 < 64; sq64++) {
     const sq = MAILBOX_64[sq64];
     const piece = board[sq];
@@ -1163,146 +1243,196 @@ export function evaluate(state) {
     const pieceType = Math.abs(piece);
     const color = piece > 0 ? WHITE : BLACK;
     
-    // Material
-    let pieceScore = PIECE_VALUES[pieceType];
+    // Material value (pawns already devalued to 80cp)
+    const matValue = PIECE_VALUES[pieceType];
     
-    // PST (flip index for black)
+    if (color === WHITE) {
+      whiteMaterial += matValue;
+      if (pieceType === 3) whiteBishops++; // Count bishops for bishop pair
+    } else {
+      blackMaterial += matValue;
+      if (pieceType === 3) blackBishops++;
+    }
+    
+    // PST bonus
     const pstIndex = color === WHITE ? sq64 : (7 - Math.floor(sq64 / 8)) * 8 + (sq64 % 8);
-    pieceScore += PST[pieceType][pstIndex];
+    const pstValue = PST[pieceType][pstIndex];
     
-    // White pieces add to score, black pieces subtract
-    score += pieceScore * color;
+    score += (matValue + pstValue) * color;
   }
   
-  // Bonus for castling rights (king safety potential)
-  // Significantly increased to discourage losing castling rights
-  if (state.castling & 0b1000) score += 50; // White kingside
-  if (state.castling & 0b0100) score += 25; // White queenside
-  if (state.castling & 0b0010) score -= 50; // Black kingside (subtract because Black is negative)
-  if (state.castling & 0b0001) score -= 25; // Black queenside
+  // =========================================================================
+  // PHASE 2: Development (BUFFED - 45cp per piece)
+  // In Marseillais, development is worth MORE than standard chess
+  // =========================================================================
+  let whiteUndeveloped = 0;
+  let blackUndeveloped = 0;
   
-  // HEAVY penalty for king that moved without castling
-  // King on starting square (95 for white, 25 for black) or castled squares is fine
-  // White castled positions: 97 (g1 kingside), 93 (c1 queenside)
-  // Black castled positions: 27 (g8 kingside), 23 (c8 queenside)
-  const whiteKingBad = state.whiteKingSq !== 95 && state.whiteKingSq !== 97 && state.whiteKingSq !== 93;
-  const blackKingBad = state.blackKingSq !== 25 && state.blackKingSq !== 27 && state.blackKingSq !== 23;
+  if (board[MAILBOX_64[57]] === W_KNIGHT) whiteUndeveloped++;
+  if (board[MAILBOX_64[62]] === W_KNIGHT) whiteUndeveloped++;
+  if (board[MAILBOX_64[58]] === W_BISHOP) whiteUndeveloped++;
+  if (board[MAILBOX_64[61]] === W_BISHOP) whiteUndeveloped++;
+  if (board[MAILBOX_64[1]] === B_KNIGHT) blackUndeveloped++;
+  if (board[MAILBOX_64[6]] === B_KNIGHT) blackUndeveloped++;
+  if (board[MAILBOX_64[2]] === B_BISHOP) blackUndeveloped++;
+  if (board[MAILBOX_64[5]] === B_BISHOP) blackUndeveloped++;
   
-  if (whiteKingBad) score -= 120; // White king moved without castling - very bad
-  if (blackKingBad) score += 120; // Black king moved without castling - very bad for black
+  const whiteDeveloped = 4 - whiteUndeveloped;
+  const blackDeveloped = 4 - blackUndeveloped;
   
-  // Bonus for central pawn control (d4/e4 for White, d5/e5 for Black)
-  // This encourages pawn-first development rather than knight-first
-  // Strong bonus because controlling the center is crucial in double-move chess
-  const d4 = board[MAILBOX_64[27]]; // d4 square
-  const e4 = board[MAILBOX_64[28]]; // e4 square  
-  const d5 = board[MAILBOX_64[35]]; // d5 square
-  const e5 = board[MAILBOX_64[36]]; // e5 square
+  // MARSEILLAIS ADJUSTMENT: 60cp per developed piece
+  // Developing 2 pieces in a turn = +120cp, beats grabbing pawn (80cp)
+  score += whiteDeveloped * 60;
+  score -= blackDeveloped * 60;
   
-  if (d4 === W_PAWN) score += 40; // White pawn on d4
-  if (e4 === W_PAWN) score += 40; // White pawn on e4
-  if (d5 === B_PAWN) score -= 40; // Black pawn on d5
-  if (e5 === B_PAWN) score -= 40; // Black pawn on e5
+  // =========================================================================
+  // PHASE 3: Bishop Pair Bonus (+150cp) - very significant in Marseillais
+  // Two bishops can coordinate attacks in a double-move turn (Bc4 Bxf7+)
+  // Losing the pair is costly; removing opponent's pair is valuable
+  // This strongly encourages: take their bishop (not knight) when given choice
+  // =========================================================================
+  if (whiteBishops >= 2) score += 150;
+  if (blackBishops >= 2) score -= 150;
   
-  // Penalize exposed knights - knights on c3/f3 (White) or c6/f6 (Black) 
-  // that CAN be attacked by enemy d/e pawns (pawns on d5/e5, not d7/e7!)
-  // This discourages double-knight development without pawn support
-  const c3 = board[MAILBOX_64[42]]; // c3 square
-  const f3 = board[MAILBOX_64[45]]; // f3 square
-  const c6 = board[MAILBOX_64[18]]; // c6 square
-  const f6 = board[MAILBOX_64[21]]; // f6 square
-  const d5pawn = board[MAILBOX_64[35]]; // d5 pawn (can attack c6/e6)
-  const e5pawn = board[MAILBOX_64[36]]; // e5 pawn (can attack d6/f6)
-  const d4pawn = board[MAILBOX_64[27]]; // d4 pawn (can attack c3/e3)
-  const e4pawn = board[MAILBOX_64[28]]; // e4 pawn (can attack d3/f3)
-  
-  // Count exposed knights (actually under attack by pawns)
-  let whiteExposed = 0;
-  let blackExposed = 0;
-  
-  if (c3 === W_KNIGHT && d4pawn === B_PAWN) whiteExposed++;
-  if (f3 === W_KNIGHT && e4pawn === B_PAWN) whiteExposed++;
-  if (c6 === B_KNIGHT && d5pawn === W_PAWN) blackExposed++;
-  if (f6 === B_KNIGHT && e5pawn === W_PAWN) blackExposed++;
-  
-  // Penalize having exposed knights (worse if both are exposed)
-  if (whiteExposed === 1) score -= 20;
-  if (whiteExposed === 2) score -= 60; // Much worse when BOTH knights exposed
-  if (blackExposed === 1) score += 20;
-  if (blackExposed === 2) score += 60;
-  
-  // Penalize minor pieces (knights/bishops) that can be attacked by enemy pawn pushes
-  // This prevents tactical blunders like Nf5 when g4 gxf5 wins the knight
-  // Check each minor piece and see if an enemy pawn can push to attack it
+  // =========================================================================
+  // PHASE 4: Anti-Trading Piece Count Bonus
+  // In Marseillais, more pieces = more double-move threats
+  // Each minor/major piece is worth +25cp just for existing (on top of material)
+  // This makes even trades bad because you lose the "activity" bonus
+  // =========================================================================
+  let whitePieceCount = 0;
+  let blackPieceCount = 0;
   for (let sq64 = 0; sq64 < 64; sq64++) {
     const sq = MAILBOX_64[sq64];
     const piece = board[sq];
     if (piece === EMPTY) continue;
-    
     const pieceType = Math.abs(piece);
-    if (pieceType !== W_KNIGHT && pieceType !== W_BISHOP) continue;
-    
-    const pieceColor = piece > 0 ? WHITE : BLACK;
-    const rank = Math.floor(sq64 / 8);
-    const file = sq64 % 8;
-    
-    // Check if enemy pawns can push to attack this piece
-    if (pieceColor === WHITE) {
-      // White piece - check if black pawns can attack it
-      // Black pawns attack diagonally downward (from black's perspective, upward on board)
-      // A black pawn on rank-2, file-1 or file+1 can push to attack
-      if (rank >= 2 && rank <= 5) { // Piece in vulnerable area
-        // Check left diagonal - pawn would be at (rank-2, file-1) and push to (rank-1, file-1)
-        if (file > 0) {
-          const pawnSq = MAILBOX_64[(rank - 2) * 8 + (file - 1)];
-          if (board[pawnSq] === B_PAWN) {
-            // Check path is clear for pawn push
-            const pushSq = MAILBOX_64[(rank - 1) * 8 + (file - 1)];
-            if (board[pushSq] === EMPTY) {
-              score -= 60; // Significant penalty - piece can be attacked by pawn push
-            }
-          }
-        }
-        // Check right diagonal
-        if (file < 7) {
-          const pawnSq = MAILBOX_64[(rank - 2) * 8 + (file + 1)];
-          if (board[pawnSq] === B_PAWN) {
-            const pushSq = MAILBOX_64[(rank - 1) * 8 + (file + 1)];
-            if (board[pushSq] === EMPTY) {
-              score -= 60;
-            }
-          }
-        }
-      }
-    } else {
-      // Black piece - check if white pawns can attack it
-      // White pawns attack diagonally upward
-      if (rank >= 2 && rank <= 5) { // Piece in vulnerable area
-        // Check left diagonal - pawn would be at (rank+2, file-1) and push to (rank+1, file-1)
-        if (file > 0) {
-          const pawnSq = MAILBOX_64[(rank + 2) * 8 + (file - 1)];
-          if (board[pawnSq] === W_PAWN) {
-            const pushSq = MAILBOX_64[(rank + 1) * 8 + (file - 1)];
-            if (board[pushSq] === EMPTY) {
-              score += 60; // Positive = bad for black
-            }
-          }
-        }
-        // Check right diagonal
-        if (file < 7) {
-          const pawnSq = MAILBOX_64[(rank + 2) * 8 + (file + 1)];
-          if (board[pawnSq] === W_PAWN) {
-            const pushSq = MAILBOX_64[(rank + 1) * 8 + (file + 1)];
-            if (board[pushSq] === EMPTY) {
-              score += 60;
-            }
-          }
-        }
-      }
+    // Count knights, bishops, rooks, queens (not pawns or kings)
+    if (pieceType >= 2 && pieceType <= 5) {
+      if (piece > 0) whitePieceCount++;
+      else blackPieceCount++;
+    }
+  }
+  // +25cp per piece - trading pieces loses this bonus for BOTH sides
+  // but if you initiate the trade, opponent can recapture and you wasted a turn
+  score += whitePieceCount * 25;
+  score -= blackPieceCount * 25;
+  
+  // =========================================================================
+  // PHASE 5: King Safety - Aggressive Penalty
+  // In double-move chess, pieces near enemy king are VERY dangerous
+  // =========================================================================
+  const whiteKingAttackers = countKingAttackers(state, state.whiteKingSq, false);
+  const blackKingAttackers = countKingAttackers(state, state.blackKingSq, true);
+  
+  // -30cp per enemy piece near your king
+  score -= whiteKingAttackers * 30;
+  score += blackKingAttackers * 30;
+  
+  // =========================================================================
+  // PHASE 5b: Pawn Shield - Penalize exposed king diagonals
+  // The f-pawn (f2/f7) is critical for protecting the king from Qh5+/Qxf7# attacks
+  // In Marseillais, this is EXTREMELY dangerous because opponent can Qh5+ Qxf7#
+  // or Bc4 Bxf7+ in a single turn. Penalty must outweigh any pawn capture gain.
+  // =========================================================================
+  // f2 pawn missing for white (king on e1 or g1) = big penalty
+  if (state.whiteKingSq === 95 || state.whiteKingSq === 97) { // e1 or g1
+    // Check if f2 pawn is missing (sq64=53 = f2)
+    if (board[MAILBOX_64[53]] !== W_PAWN) {
+      score -= 150; // Exposed king diagonal - very dangerous in Marseillais
+    }
+    // Also penalize missing g2 pawn if king is on g1
+    if (state.whiteKingSq === 97 && board[MAILBOX_64[54]] !== W_PAWN) {
+      score -= 80;
     }
   }
   
-  // Always return from WHITE's perspective
+  // f7 pawn missing for black (king on e8 or g8) = big penalty  
+  if (state.blackKingSq === 25 || state.blackKingSq === 27) { // e8 or g8
+    // Check if f7 pawn is missing (sq64=5 = f7)
+    if (board[MAILBOX_64[5]] !== B_PAWN) {
+      score += 150; // Exposed king diagonal (good for white)
+    }
+    // Also penalize missing g7 pawn if king is on g8
+    if (state.blackKingSq === 27 && board[MAILBOX_64[6]] !== B_PAWN) {
+      score += 80;
+    }
+  }
+  
+  // =========================================================================
+  // PHASE 6: Castling
+  // =========================================================================
+  if (state.castling & 0b1000) score += 30;
+  if (state.castling & 0b0100) score += 15;
+  if (state.castling & 0b0010) score -= 30;
+  if (state.castling & 0b0001) score -= 15;
+  
+  // Castled bonus
+  if (state.whiteKingSq === 97) score += 80;
+  if (state.whiteKingSq === 93) score += 60;
+  if (state.blackKingSq === 27) score -= 80;
+  if (state.blackKingSq === 23) score -= 60;
+  
+  // King moved without castling - penalty
+  const whiteKingBad = state.whiteKingSq !== 95 && state.whiteKingSq !== 97 && state.whiteKingSq !== 93;
+  const blackKingBad = state.blackKingSq !== 25 && state.blackKingSq !== 27 && state.blackKingSq !== 23;
+  if (whiteKingBad) score -= 80;
+  if (blackKingBad) score += 80;
+  
+  // =========================================================================
+  // PHASE 7: Center Control (count attacks, not just pawns)
+  // =========================================================================
+  // Central squares in 64-index: d4=27, e4=28, d5=35, e5=36
+  const centerSquares64 = [27, 28, 35, 36];
+  let whiteCenterControl = 0;
+  let blackCenterControl = 0;
+  
+  for (const sq64 of centerSquares64) {
+    const sq = MAILBOX_64[sq64];
+    const piece = board[sq];
+    
+    // Pawn on center = strong control
+    if (piece === W_PAWN) whiteCenterControl += 2;
+    else if (piece === B_PAWN) blackCenterControl += 2;
+    // Piece on center = some control
+    else if (piece > 0) whiteCenterControl += 1;
+    else if (piece < 0) blackCenterControl += 1;
+  }
+  
+  score += whiteCenterControl * 15;
+  score -= blackCenterControl * 15;
+  
+  // =========================================================================
+  // PHASE 8: Early Queen Penalty
+  // =========================================================================
+  const whiteQueenSq = findPiece(board, W_QUEEN);
+  const blackQueenSq = findPiece(board, B_QUEEN);
+  
+  if (whiteQueenSq !== -1 && whiteQueenSq !== 59 && whiteUndeveloped >= 2) {
+    score -= 50;
+  }
+  if (blackQueenSq !== -1 && blackQueenSq !== 3 && blackUndeveloped >= 2) {
+    score += 50;
+  }
+  
+  // =========================================================================
+  // PHASE 9: ANTI-TRADE PENALTY (Critical for Marseillais)
+  // If you've traded pieces while still undeveloped, you've wasted tempo
+  // Count total minor+major pieces - if below starting count while undeveloped, penalty
+  // =========================================================================
+  const totalPieces = whitePieceCount + blackPieceCount;
+  const startingPieces = 14; // 4 knights + 4 bishops + 4 rooks + 2 queens
+  const piecesTradedAway = startingPieces - totalPieces;
+  
+  // Heavy penalty for trading while undeveloped
+  // If black is undeveloped and pieces have been traded, black is doing it wrong
+  if (blackUndeveloped >= 2 && piecesTradedAway > 0) {
+    score += piecesTradedAway * 40; // +40cp penalty to black per piece traded
+  }
+  if (whiteUndeveloped >= 2 && piecesTradedAway > 0) {
+    score -= piecesTradedAway * 40; // +40cp penalty to white per piece traded
+  }
+  
   return score;
 }
 
@@ -1342,6 +1472,7 @@ for (let victim = 1; victim <= 6; victim++) {
 
 /**
  * Score a move for ordering (higher = search first)
+ * Uses SEE to properly order captures: winning > equal > quiet > losing
  */
 function scoreMove(state, move, ply, ttMove) {
   // TT move gets highest priority
@@ -1356,21 +1487,35 @@ function scoreMove(state, move, ply, ttMove) {
   
   let score = 0;
   
-  // Captures: MVV-LVA scoring
+  // Captures: Use SEE to determine if it's winning, equal, or losing
   if (captured !== 0) {
+    const seeScore = staticExchangeEval(state, move);
     const attacker = Math.abs(state.board[from]);
     const victim = Math.abs(captured);
-    score += 100000 + MVV_LVA[victim * 7 + attacker];
+    
+    if (seeScore > 0) {
+      // Winning capture - highest priority (after TT move)
+      // Add MVV-LVA for ordering among winning captures
+      score = 100000 + MVV_LVA[victim * 7 + attacker];
+    } else if (seeScore === 0) {
+      // Equal trade - medium priority (below killers)
+      // This prevents blind trading when development is better
+      score = 60000 + MVV_LVA[victim * 7 + attacker];
+    } else {
+      // Losing capture - very low priority (below quiet moves)
+      // Still use MVV-LVA to order among losing captures
+      score = 5000 + MVV_LVA[victim * 7 + attacker];
+    }
     return score;
   }
   
-  // Promotions
+  // Promotions (non-capture)
   if (promotion !== 0) {
     score += 90000 + PIECE_VALUES[promotion];
     return score;
   }
   
-  // Killer moves
+  // Killer moves - now above equal captures!
   if (ply < MAX_PLY) {
     if (move === killerMoves[ply][0]) {
       return 80000;
@@ -1488,31 +1633,6 @@ const CHECKMATE_SCORE = 100000;
 const DRAW_SCORE = 0;
 
 let nodesSearched = 0;
-let ttHits = 0;
-let ttCutoffs = 0; // DEBUG_OPT: track TT cutoffs
-let betaCutoffs = 0; // DEBUG_OPT: track beta cutoffs
-let rootColor = WHITE; // The color we're searching for at the root
-
-// DEBUG_OPT: Logging control
-const DEBUG_OPT = false; // Set to true to enable optimization debugging
-
-// LMR reduction table
-const LMR_TABLE = [];
-for (let d = 0; d < 64; d++) {
-  LMR_TABLE[d] = [];
-  for (let m = 0; m < 64; m++) {
-    if (d === 0 || m === 0) {
-      LMR_TABLE[d][m] = 0;
-    } else {
-      LMR_TABLE[d][m] = Math.floor(0.5 + Math.log(d) * Math.log(m) / 2.5);
-    }
-  }
-}
-
-// Late Move Pruning (LMP) limits - how many quiet moves to search at each depth
-// At very low depths, prune late quiet moves completely
-// More aggressive for double-move chess due to high branching factor
-const LMP_LIMITS = [0, 3, 6, 10, 16, 24, 36, 50]; // moves allowed at depth 0-7+
 
 /**
  * Check if the game is over
@@ -1554,437 +1674,718 @@ function evalForColor(state, color) {
 }
 
 /**
- * Search a double-move turn using negamax with TT and LMR
- * Returns score from the perspective of 'color'
- * Positive = good for color, negative = bad for color
+ * Generate only capture moves (for quiescence search)
  */
-function searchDoubleTurn(state, depth, alpha, beta, color, ply = 0) {
-  nodesSearched++;
+function generateCaptureMoves(state, color) {
+  const moves = [];
+  const board = state.board;
   
-  const alphaOrig = alpha;
-  
-  // Transposition table probe
-  const ttProbe = tt.probe(state.zobristHash, depth, alpha, beta);
-  let ttMove = 0;
-  if (ttProbe) {
-    ttMove = ttProbe.bestMove || 0;
-    if (ttProbe.score !== null) {
-      ttHits++;
-      ttCutoffs++; // DEBUG_OPT
-      return ttProbe.score;
+  for (let sq64 = 0; sq64 < 64; sq64++) {
+    const sq = MAILBOX_64[sq64];
+    const piece = board[sq];
+    
+    if (piece === EMPTY) continue;
+    if (piece * color <= 0) continue; // Not our piece
+    
+    const pieceType = Math.abs(piece);
+    
+    switch (pieceType) {
+      case W_PAWN:
+        generatePawnCaptures(state, sq, color, moves);
+        break;
+      case W_KNIGHT:
+        generatePieceCaptures(state, sq, color, KNIGHT_OFFSETS, false, moves);
+        break;
+      case W_BISHOP:
+        generatePieceCaptures(state, sq, color, BISHOP_OFFSETS, true, moves);
+        break;
+      case W_ROOK:
+        generatePieceCaptures(state, sq, color, ROOK_OFFSETS, true, moves);
+        break;
+      case W_QUEEN:
+        generatePieceCaptures(state, sq, color, QUEEN_OFFSETS, true, moves);
+        break;
+      case W_KING:
+        generatePieceCaptures(state, sq, color, KING_OFFSETS, false, moves);
+        break;
     }
   }
   
-  // Terminal conditions
-  const result = getGameResult(state, color);
-  if (result === 'checkmate') {
-    return -CHECKMATE_SCORE + ply;
-  }
-  if (result === 'stalemate' || result === 'fifty-move' || result === 'repetition') {
-    return DRAW_SCORE;
-  }
+  return moves;
+}
+
+/**
+ * Generate pawn captures only (including promotions)
+ */
+function generatePawnCaptures(state, from, color, moves) {
+  const board = state.board;
+  const dir = color === WHITE ? -10 : 10;
+  const promoRank = color === WHITE ? 2 : 9;
+  const fromRank = Math.floor(MAILBOX_120[from] / 8);
+  const isPromo = (color === WHITE && fromRank === 1) || (color === BLACK && fromRank === 6);
   
-  if (depth <= 0) {
-    return evalForColor(state, color);
-  }
-  
-  // Null Move Pruning: Skip our turn and see if we're still good
-  // Only do this when not in check and at sufficient depth
-  const inCheck = isInCheck(state, color);
-  if (!inCheck && depth >= 2 && beta < CHECKMATE_SCORE - 100) {
-    // "Pass" our turn - let opponent move
-    // Use a reduced depth search
-    const nullDepth = Math.max(0, depth - 2 - Math.floor(depth / 4)); // Adaptive reduction
-    const nullScore = -searchDoubleTurn(state, nullDepth, -beta, -beta + 1, -color, ply + 1);
+  // Captures
+  for (const capDir of [-1, 1]) {
+    const capTo = from + dir + capDir;
+    const target = board[capTo];
     
-    if (nullScore >= beta) {
-      // Position is so good that even skipping our turn beats beta
-      betaCutoffs++; // DEBUG_OPT
-      return beta; // Fail-hard beta cutoff
-    }
-  }
-  
-  // Static eval for futility pruning
-  const staticEval = evalForColor(state, color);
-  
-  // Reverse Futility Pruning (Static Null Move Pruning)
-  // If static eval already beats beta by a margin, return early
-  const RFP_MARGIN = [0, 100, 200, 300, 400];
-  if (!inCheck && depth <= 4 && staticEval - RFP_MARGIN[depth] >= beta) {
-    return staticEval;
-  }
-  
-  // Futility Pruning margins
-  const FUTILITY_MARGIN = [0, 200, 400, 600];
-  const canFutility = !inCheck && depth <= 3 && staticEval + FUTILITY_MARGIN[depth] <= alpha;
-  
-  // Late Move Pruning limit for this depth
-  const lmpLimit = depth < LMP_LIMITS.length ? LMP_LIMITS[depth] : 100;
-  
-  const legalMoves = generateLegalMoves(state, color);
-  const firstMoves = orderMoves(state, legalMoves, ply, ttMove);
-  
-  if (firstMoves.length === 0) {
-    return evalForColor(state, color);
-  }
-  
-  let bestScore = -Infinity;
-  let bestMove = 0;
-  let moveCount = 0;
-  let quietMoveCount = 0; // Count quiet moves for LMP
-  
-  for (const move1 of firstMoves) {
-    moveCount++;
-    
-    // Futility pruning for first move
-    const captured1 = getMoveCaptured(move1);
-    const isQuiet1 = captured1 === 0 && getMovePromotion(move1) === 0;
-    
-    if (isQuiet1) {
-      quietMoveCount++;
-      // Late Move Pruning - skip late quiet moves at low depths
-      if (!inCheck && depth <= 4 && quietMoveCount > lmpLimit) {
-        continue;
+    if (target !== OFF_BOARD && target !== EMPTY && target * color < 0) {
+      if (isPromo) {
+        moves.push(encodeMove(from, capTo, target, W_QUEEN, 0));
+        moves.push(encodeMove(from, capTo, target, W_ROOK, 0));
+        moves.push(encodeMove(from, capTo, target, W_BISHOP, 0));
+        moves.push(encodeMove(from, capTo, target, W_KNIGHT, 0));
+      } else {
+        moves.push(encodeMove(from, capTo, target, 0, FLAG_NORMAL));
       }
     }
     
-    if (canFutility && moveCount > 1 && isQuiet1) {
-      continue; // Skip this move - it can't raise alpha
+    // En passant
+    if (capTo === state.epSquare) {
+      const epPawnSq = capTo + (color === WHITE ? 10 : -10);
+      const epPawn = board[epPawnSq];
+      if (epPawn !== EMPTY && epPawn * color < 0 && Math.abs(epPawn) === W_PAWN) {
+        const epCaptured = color === WHITE ? B_PAWN : W_PAWN;
+        moves.push(encodeMove(from, capTo, epCaptured, 0, FLAG_EP));
+      }
     }
+  }
+  
+  // Promotion pushes (not captures but tactically critical)
+  if (isPromo) {
+    const pushTo = from + dir;
+    if (board[pushTo] === EMPTY) {
+      moves.push(encodeMove(from, pushTo, 0, W_QUEEN, 0));
+    }
+  }
+}
+
+/**
+ * Generate captures only for non-pawn pieces
+ */
+function generatePieceCaptures(state, from, color, offsets, sliding, moves) {
+  const board = state.board;
+  
+  for (const offset of offsets) {
+    let to = from + offset;
     
+    if (sliding) {
+      while (board[to] !== OFF_BOARD) {
+        const target = board[to];
+        if (target !== EMPTY) {
+          if (target * color < 0) { // Enemy piece - capture
+            moves.push(encodeMove(from, to, target, 0, FLAG_NORMAL));
+          }
+          break; // Blocked
+        }
+        to += offset;
+      }
+    } else {
+      const target = board[to];
+      if (target !== OFF_BOARD && target !== EMPTY && target * color < 0) {
+        moves.push(encodeMove(from, to, target, 0, FLAG_NORMAL));
+      }
+    }
+  }
+}
+
+// ============================================================================
+// TURN-BASED SEARCH (Simple & Correct for Double-Move Chess)
+// ============================================================================
+
+/**
+ * Score a first move for ordering/pruning decisions.
+ * Used to identify promising first moves that get full second-move expansion.
+ */
+function scoreFirstMove(state, move) {
+  const captured = getMoveCaptured(move);
+  const promotion = getMovePromotion(move);
+  const from = getMoveFrom(move);
+  const to = getMoveTo(move);
+  const piece = Math.abs(state.board[from]);
+  
+  let score = 0;
+  
+  // Captures - prioritize by SEE
+  if (captured !== 0) {
+    const seeScore = staticExchangeEval(state, move);
+    if (seeScore > 0) {
+      score += 10000 + PIECE_VALUES[Math.abs(captured)];
+    } else if (seeScore === 0) {
+      score += 5000 + PIECE_VALUES[Math.abs(captured)];
+    } else {
+      score += 1000; // Losing capture still might enable tactics
+    }
+  }
+  
+  // Promotions
+  if (promotion !== 0) {
+    score += 9000 + PIECE_VALUES[promotion];
+  }
+  
+  // Central squares bonus (d4, e4, d5, e5) for pieces
+  const to64 = MAILBOX_120[to];
+  if (to64 >= 0 && piece >= W_KNIGHT) {
+    const rank = Math.floor(to64 / 8);
+    const file = to64 % 8;
+    if ((rank === 3 || rank === 4) && (file === 3 || file === 4)) {
+      score += 200;
+    }
+  }
+  
+  // Development bonus - moving minor pieces from back rank
+  const from64 = MAILBOX_120[from];
+  if (from64 >= 0 && (piece === W_KNIGHT || piece === W_BISHOP)) {
+    const fromRank = Math.floor(from64 / 8);
+    if (fromRank === 0 || fromRank === 7) {
+      score += 150; // Developing from home square
+    }
+  }
+  
+  // PST bonus for destination
+  if (piece > 0 && piece <= 6 && to64 >= 0) {
+    const color = state.board[from] > 0 ? WHITE : BLACK;
+    const pstIndex = color === WHITE ? to64 : (7 - Math.floor(to64 / 8)) * 8 + (to64 % 8);
+    score += PST[piece][pstIndex] / 2;
+  }
+  
+  return score;
+}
+
+/**
+ * Generate all legal turns for a color.
+ * A turn is [move1, move2] or [move1] if move1 gives check.
+ * Returns array of turns, each turn is an array of 1-2 encoded moves.
+ * 
+ * OPTIMIZATION: Late first moves only get tactical second-move expansion.
+ * This skips the expensive generateLegalMoves call for unpromising first moves.
+ */
+function generateAllTurns(state, color, maxMoves = 2) {
+  const turns = [];
+  const firstMoves = generateLegalMoves(state, color);
+  
+  if (maxMoves === 1) {
+    // Single-move mode (balanced first turn)
+    for (const move1 of firstMoves) {
+      turns.push([move1]);
+    }
+    return turns;
+  }
+  
+  // Score and sort first moves for pruning decisions
+  // Top moves get full expansion, rest only get captures as second moves
+  const FULL_EXPANSION_LIMIT = 15;
+  const TACTICAL_EXPANSION_LIMIT = 25; // Beyond this, only single-move or check turns
+  
+  const scoredFirst = firstMoves.map(m => ({
+    move: m,
+    score: scoreFirstMove(state, m)
+  }));
+  scoredFirst.sort((a, b) => b.score - a.score);
+  
+  for (let i = 0; i < scoredFirst.length; i++) {
+    const move1 = scoredFirst[i].move;
     const undoInfo1 = makeMove(state, move1);
     
+    // Check if first move gave check - turn ends
     const gaveCheck = isInCheck(state, -color);
-    let turnScore;
-    let turnBestMove = move1;
-    
-    // LMR for first moves too - aggressive pruning after first few moves
-    let firstMoveReduction = 0;
-    if (moveCount > 3 && depth >= 2 && !gaveCheck && isQuiet1) {
-      firstMoveReduction = Math.floor(Math.log(moveCount) * 0.5);
-    }
     
     if (gaveCheck) {
-      // Turn ends with check - opponent's turn
-      turnScore = -searchDoubleTurn(state, depth - 1, -beta, -alpha, -color, ply + 1);
-    } else {
-      // Get second moves
-      const secondLegalMoves = generateLegalMoves(state, color);
-      const secondMoves = orderMoves(state, secondLegalMoves, ply, 0);
-      
+      turns.push([move1]);
+    } else if (i < FULL_EXPANSION_LIMIT) {
+      // Full expansion for top first moves
+      const secondMoves = generateLegalMoves(state, color);
       if (secondMoves.length === 0) {
-        turnScore = evalForColor(state, color);
+        turns.push([move1]);
       } else {
-        let bestSecond = -Infinity;
-        let bestSecondMove = 0;
-        let secondMoveCount = 0;
-        let secondQuietCount = 0; // For LMP in second moves
-        let localAlpha = alpha; // Track alpha for second moves
-        
         for (const move2 of secondMoves) {
-          secondMoveCount++;
-          
-          // Futility pruning for second move
-          const captured2 = getMoveCaptured(move2);
-          const isQuiet2 = captured2 === 0 && getMovePromotion(move2) === 0;
-          
-          if (isQuiet2) {
-            secondQuietCount++;
-            // Late Move Pruning for second moves - be aggressive
-            if (!inCheck && depth <= 4 && secondQuietCount > lmpLimit) {
-              continue;
-            }
-          }
-          
-          if (canFutility && secondMoveCount > 1 && isQuiet2) {
-            continue; // Skip this move - it can't raise alpha
-          }
-          
-          const undoInfo2 = makeMove(state, move2);
-          
-          // More aggressive LMR - apply after first 2 moves
-          let reduction = firstMoveReduction;
-          if (secondMoveCount > 2 && depth >= 2 && isQuiet2) {
-            reduction += LMR_TABLE[Math.min(depth, 63)][Math.min(secondMoveCount, 63)];
-          }
-          
-          let score;
-          const searchDepth = Math.max(0, depth - 1 - reduction);
-          
-          // PVS: First move with full window, rest with null window
-          if (secondMoveCount === 1) {
-            // First move: full window search
-            score = -searchDoubleTurn(state, depth - 1, -beta, -localAlpha, -color, ply + 1);
-          } else if (reduction > 0 && searchDepth < depth - 1) {
-            // LMR: Search with reduced depth first
-            score = -searchDoubleTurn(state, searchDepth, -localAlpha - 1, -localAlpha, -color, ply + 1);
-            // Re-search at full depth if it beats alpha
-            if (score > localAlpha && score < beta) {
-              score = -searchDoubleTurn(state, depth - 1, -beta, -localAlpha, -color, ply + 1);
-            }
-          } else {
-            // PVS: Null window search
-            score = -searchDoubleTurn(state, depth - 1, -localAlpha - 1, -localAlpha, -color, ply + 1);
-            // Re-search with full window if it beats alpha
-            if (score > localAlpha && score < beta) {
-              score = -searchDoubleTurn(state, depth - 1, -beta, -localAlpha, -color, ply + 1);
-            }
-          }
-          
-          undoMove(state, move2, undoInfo2);
-          
-          if (score > bestSecond) {
-            bestSecond = score;
-            bestSecondMove = move2;
-          }
-          
-          // Update alpha for pruning within second-move loop
-          if (score > localAlpha) {
-            localAlpha = score;
-          }
-          
-          if (bestSecond >= beta) {
-            betaCutoffs++; // DEBUG_OPT
-            // Store killer and update history for quiet moves
-            if (captured2 === 0) {
-              storeKiller(ply, move2);
-              updateHistory(state, move2, depth);
-            }
-            break;
-          }
+          turns.push([move1, move2]);
         }
-        
-        turnScore = bestSecond;
-        turnBestMove = encodeDoubleTurn(move1, bestSecondMove);
       }
+    } else if (i < TACTICAL_EXPANSION_LIMIT) {
+      // FAST tactical expansion: only generate captures (skip full legal gen)
+      // Use pseudo-legal captures, then filter for legality
+      const captures = generateTacticalMoves(state, color);
+      if (captures.length === 0) {
+        turns.push([move1]); // Single-move turn as fallback
+      } else {
+        for (const move2 of captures) {
+          turns.push([move1, move2]);
+        }
+      }
+    } else {
+      // Very late first moves: just add as single-move turn
+      // These are unlikely to be best anyway
+      turns.push([move1]);
     }
     
     undoMove(state, move1, undoInfo1);
+  }
+  
+  return turns;
+}
+
+/**
+ * Generate only tactical moves (captures and promotions) - FAST version.
+ * Filters for legality but skips quiet moves entirely.
+ */
+function generateTacticalMoves(state, color) {
+  const moves = [];
+  const board = state.board;
+  
+  for (let sq64 = 0; sq64 < 64; sq64++) {
+    const from = MAILBOX_64[sq64];
+    const piece = board[from];
     
-    if (turnScore > bestScore) {
-      bestScore = turnScore;
-      bestMove = turnBestMove;
-    }
+    if (piece === EMPTY || piece * color <= 0) continue;
     
-    alpha = Math.max(alpha, turnScore);
-    if (alpha >= beta) {
-      betaCutoffs++; // DEBUG_OPT
-      if (getMoveCaptured(move1) === 0) {
-        storeKiller(ply, move1);
-        updateHistory(state, move1, depth);
+    const pieceType = Math.abs(piece);
+    
+    if (pieceType === W_PAWN) {
+      // Pawn captures and promotions only
+      const dir = color === WHITE ? -10 : 10;
+      const promoRank = color === WHITE ? 2 : 9;
+      const to = from + dir;
+      const isPromo = Math.floor(to / 10) === promoRank;
+      
+      // Promotion pushes
+      if (isPromo && board[to] === EMPTY) {
+        moves.push(encodeMove(from, to, 0, W_QUEEN, 0));
       }
-      break;
+      
+      // Captures (including promotion captures)
+      for (const capDir of [-1, 1]) {
+        const capTo = from + dir + capDir;
+        const target = board[capTo];
+        
+        if (target !== OFF_BOARD && target !== EMPTY && target * color < 0) {
+          if (isPromo) {
+            moves.push(encodeMove(from, capTo, target, W_QUEEN, 0));
+          } else {
+            moves.push(encodeMove(from, capTo, target, 0, FLAG_NORMAL));
+          }
+        }
+        
+        // En passant
+        if (capTo === state.epSquare) {
+          const epPawnSq = capTo + (color === WHITE ? 10 : -10);
+          const epPawn = board[epPawnSq];
+          if (epPawn !== EMPTY && epPawn * color < 0 && Math.abs(epPawn) === W_PAWN) {
+            const epCaptured = color === WHITE ? B_PAWN : W_PAWN;
+            moves.push(encodeMove(from, capTo, epCaptured, 0, FLAG_EP));
+          }
+        }
+      }
+    } else if (pieceType === W_KNIGHT) {
+      // Knight captures only
+      for (const offset of KNIGHT_OFFSETS) {
+        const to = from + offset;
+        const target = board[to];
+        if (target !== OFF_BOARD && target !== EMPTY && target * color < 0) {
+          moves.push(encodeMove(from, to, target, 0, FLAG_NORMAL));
+        }
+      }
+    } else if (pieceType === W_KING) {
+      // King captures only (no castling in tactical gen)
+      for (const offset of KING_OFFSETS) {
+        const to = from + offset;
+        const target = board[to];
+        if (target !== OFF_BOARD && target !== EMPTY && target * color < 0) {
+          moves.push(encodeMove(from, to, target, 0, FLAG_NORMAL));
+        }
+      }
+    } else {
+      // Sliding piece captures
+      const offsets = pieceType === W_BISHOP ? BISHOP_OFFSETS :
+                      pieceType === W_ROOK ? ROOK_OFFSETS : QUEEN_OFFSETS;
+      for (const offset of offsets) {
+        let to = from + offset;
+        while (board[to] !== OFF_BOARD) {
+          const target = board[to];
+          if (target !== EMPTY) {
+            if (target * color < 0) {
+              moves.push(encodeMove(from, to, target, 0, FLAG_NORMAL));
+            }
+            break;
+          }
+          to += offset;
+        }
+      }
     }
   }
   
-  // Store in transposition table
-  let ttFlag = TT_EXACT;
-  if (bestScore <= alphaOrig) {
-    ttFlag = TT_ALPHA;
-  } else if (bestScore >= beta) {
-    ttFlag = TT_BETA;
+  // Filter for legality
+  const legalMoves = [];
+  for (const move of moves) {
+    const undoInfo = makeMove(state, move);
+    if (!isInCheck(state, color)) {
+      legalMoves.push(move);
+    }
+    undoMove(state, move, undoInfo);
   }
-  tt.store(state.zobristHash, depth, bestScore, ttFlag, bestMove);
+  
+  return legalMoves;
+}
+
+/**
+ * Apply a turn (1-2 moves) to the state. Returns undo info.
+ */
+function applyTurn(state, turn) {
+  const undoInfos = [];
+  for (const move of turn) {
+    undoInfos.push(makeMove(state, move));
+  }
+  return undoInfos;
+}
+
+/**
+ * Undo a turn.
+ */
+function undoTurn(state, turn, undoInfos) {
+  for (let i = turn.length - 1; i >= 0; i--) {
+    undoMove(state, turn[i], undoInfos[i]);
+  }
+}
+
+/**
+ * Score a turn for ordering. Higher = search first.
+ * FAST version - doesn't apply turn, just looks at move properties
+ */
+function scoreTurn(state, turn) {
+  let score = 0;
+  
+  // Count opponent's bishops to detect bishop pair breaking captures
+  const board = state.board;
+  let oppBishops = 0;
+  const oppColor = -state.sideToMove;
+  for (let sq64 = 0; sq64 < 64; sq64++) {
+    const sq = MAILBOX_64[sq64];
+    const piece = board[sq];
+    if (piece !== EMPTY && Math.abs(piece) === W_BISHOP && piece * oppColor > 0) {
+      oppBishops++;
+    }
+  }
+  
+  // Score individual moves based on their properties
+  for (const move of turn) {
+    const captured = getMoveCaptured(move);
+    const promotion = getMovePromotion(move);
+    const flags = getMoveFlags(move);
+    
+    if (captured !== 0) {
+      // Capture - MVV-LVA: prioritize capturing high-value pieces
+      score += 1000 + PIECE_VALUES[Math.abs(captured)] * 10;
+      
+      // BONUS: Capturing a bishop when opponent has 2 bishops breaks their pair!
+      // This is worth an extra ~150cp, so add significant bonus
+      if (Math.abs(captured) === W_BISHOP && oppBishops >= 2) {
+        score += 1500; // High priority - breaks bishop pair
+      }
+    }
+    if (promotion !== 0) {
+      score += 800 + PIECE_VALUES[promotion];
+    }
+    // Bonus for checks (first move giving check ends turn, so it's move1)
+    if (turn.length === 1 && flags !== FLAG_CASTLE) {
+      // Single-move turn might be a check
+      score += 500;
+    }
+  }
+  
+  return score;
+}
+
+/**
+ * Order turns by score (best first for alpha-beta efficiency)
+ */
+function orderTurns(state, turns) {
+  const scored = turns.map(turn => ({ turn, score: scoreTurn(state, turn) }));
+  scored.sort((a, b) => b.score - a.score);
+  return scored.map(s => s.turn);
+}
+
+// Simple transposition table - caches search results
+const TT_SIZE = 65536; // 64K entries
+const ttable = new Map();
+
+// TT entry flags - must track bound type for correct alpha-beta
+const TT_FLAG_EXACT = 0;  // True minimax value
+const TT_FLAG_ALPHA = 1;  // Upper bound (all moves failed low)
+const TT_FLAG_BETA = 2;   // Lower bound (cutoff occurred)
+
+function ttProbe(hash, depth, alpha, beta) {
+  const entry = ttable.get(hash);
+  if (entry && entry.depth >= depth) {
+    const score = entry.score;
+    const flag = entry.flag;
+    
+    // Only return exact scores directly
+    if (flag === TT_FLAG_EXACT) {
+      return score;
+    }
+    // Lower bound: can cause beta cutoff if score >= beta
+    if (flag === TT_FLAG_BETA && score >= beta) {
+      return score;
+    }
+    // Upper bound: can cause alpha cutoff if score <= alpha
+    if (flag === TT_FLAG_ALPHA && score <= alpha) {
+      return score;
+    }
+  }
+  return null;
+}
+
+function ttStore(hash, depth, score, flag) {
+  // Simple replacement: always replace (or keep deeper)
+  const existing = ttable.get(hash);
+  if (!existing || existing.depth <= depth) {
+    if (ttable.size >= TT_SIZE) {
+      // Clear half the table when full (simple strategy)
+      const keys = Array.from(ttable.keys()).slice(0, TT_SIZE / 2);
+      for (const k of keys) ttable.delete(k);
+    }
+    ttable.set(hash, { depth, score, flag });
+  }
+}
+
+// ============================================================================
+// HANGING PIECE DETECTION - Fast tactical awareness without full quiescence
+// ============================================================================
+
+/**
+ * Detect hanging pieces and return a penalty.
+ * A piece is "hanging" if:
+ * 1. It's attacked and not defended
+ * 2. It's attacked by a less valuable piece (bad trade)
+ * 3. It CAN BE attacked by a pawn advance + capture (Marseillais key tactic!)
+ * 
+ * In double-move chess, the opponent can advance a pawn AND capture in one turn,
+ * so pieces that are "one pawn push away" from being captured are in danger.
+ */
+function getHangingPiecePenalty(state, color) {
+  const board = state.board;
+  const opponent = -color;
+  let penalty = 0;
+  
+  for (let sq64 = 0; sq64 < 64; sq64++) {
+    const sq = MAILBOX_64[sq64];
+    const piece = board[sq];
+    
+    if (piece === EMPTY) continue;
+    if (piece * color <= 0) continue; // Not our piece
+    
+    const pieceType = Math.abs(piece);
+    if (pieceType === W_KING) continue; // Don't count king
+    
+    // Check if this piece is attacked by opponent
+    if (isSquareAttacked(state, sq, opponent)) {
+      // Check if it's defended by us
+      const isDefended = isSquareAttacked(state, sq, color);
+      
+      if (!isDefended) {
+        // Undefended and attacked = hanging!
+        penalty += PIECE_VALUES[pieceType];
+      } else {
+        // Defended but attacked - check for unfavorable trades
+        const pawnDir = opponent === WHITE ? -10 : 10;
+        const oppPawn = opponent === WHITE ? W_PAWN : B_PAWN;
+        if (pieceType > W_PAWN && 
+            (board[sq + pawnDir - 1] === oppPawn || board[sq + pawnDir + 1] === oppPawn)) {
+          penalty += PIECE_VALUES[pieceType] - PIECE_VALUES[W_PAWN];
+        }
+      }
+    }
+    
+    // MARSEILLAIS SPECIAL: Check if piece can be captured by pawn advance + capture
+    // This is the key tactic - opponent plays pawn push, then pawn captures
+    // Example: Knight on f6, pawn on e4 -> e5 exf6 wins the knight
+    // Example: Knight on c6, pawn on d4 -> d5 dxc6 wins the knight
+    if (pieceType >= W_KNIGHT) { // Only check for pieces, not pawns
+      const pawnAdvanceDir = opponent === WHITE ? -10 : 10; // Direction pawns move
+      const pawnStartDir = opponent === WHITE ? 10 : -10;   // Where pawn comes from
+      const oppPawn = opponent === WHITE ? W_PAWN : B_PAWN;
+      
+      // Check both diagonal attack squares
+      for (const sideDir of [-1, 1]) {
+        const attackFromSq = sq + pawnAdvanceDir + sideDir; // Square pawn attacks from
+        const pawnCurrentSq = attackFromSq + pawnStartDir;  // Where pawn is now
+        
+        // Is there an opponent pawn that can advance to attack us?
+        if (board[pawnCurrentSq] === oppPawn && board[attackFromSq] === EMPTY) {
+          // Pawn can advance and then capture us!
+          // Check if we'd be defended after the pawn advances
+          // (Simplified: assume we're not defended from this new angle)
+          const isDefended = isSquareAttacked(state, sq, color);
+          if (!isDefended) {
+            // Completely undefended - full piece value at risk
+            penalty += PIECE_VALUES[pieceType];
+          } else {
+            // Defended, but pawn trade is still bad for us
+            penalty += PIECE_VALUES[pieceType] - PIECE_VALUES[W_PAWN];
+          }
+          break; // Don't double-count
+        }
+        
+        // Also check 2-square pawn advance from starting rank
+        const pawnDoubleStartSq = pawnCurrentSq + pawnStartDir;
+        const pawnStartRank = opponent === WHITE ? 6 : 1; // Rank 2 or 7 (0-indexed)
+        const pawnDoubleRank = Math.floor(MAILBOX_120[pawnDoubleStartSq] / 8);
+        
+        if (pawnDoubleRank === pawnStartRank && 
+            board[pawnDoubleStartSq] === oppPawn && 
+            board[pawnCurrentSq] === EMPTY &&
+            board[attackFromSq] === EMPTY) {
+          // Pawn can double-advance and then capture!
+          const isDefended = isSquareAttacked(state, sq, color);
+          if (!isDefended) {
+            penalty += PIECE_VALUES[pieceType];
+          } else {
+            penalty += PIECE_VALUES[pieceType] - PIECE_VALUES[W_PAWN];
+          }
+          break;
+        }
+      }
+    }
+  }
+  
+  return penalty;
+}
+
+/**
+ * Evaluation with hanging piece detection.
+ * This replaces quiescence search with a fast static analysis.
+ */
+function evalWithHanging(state, color) {
+  const baseEval = evalForColor(state, color);
+  
+  // Penalize our hanging pieces
+  const ourHanging = getHangingPiecePenalty(state, color);
+  
+  // Bonus for opponent's hanging pieces (we can capture them)
+  const theirHanging = getHangingPiecePenalty(state, -color);
+  
+  // In double-move chess, hanging pieces are VERY bad because
+  // opponent can attack+capture in one turn. Apply 80% of the penalty.
+  return baseEval - Math.floor(ourHanging * 0.8) + Math.floor(theirHanging * 0.8);
+}
+
+/**
+ * Simple negamax search on TURNS (not moves).
+ * This is correct for double-move chess because we search atomic turns.
+ */
+function searchTurns(state, depth, alpha, beta, color) {
+  nodesSearched++;
+  
+  // Leaf node - use hanging piece detection for tactical awareness
+  if (depth <= 0) {
+    return evalWithHanging(state, color);
+  }
+  
+  // Save original alpha for TT flag determination
+  const origAlpha = alpha;
+  
+  // Check transposition table
+  const hash = state.zobristHash;
+  const ttScore = ttProbe(hash, depth, alpha, beta);
+  if (ttScore !== null) {
+    return ttScore;
+  }
+  
+  // Generate all turns
+  const turns = generateAllTurns(state, color);
+  
+  // No moves = terminal
+  if (turns.length === 0) {
+    if (isInCheck(state, color)) {
+      return -CHECKMATE_SCORE;
+    }
+    return DRAW_SCORE; // Stalemate
+  }
+  
+  // Order turns for better pruning - ALWAYS order at depth 1 to find captures first
+  const orderedTurns = turns.length > 8 ? orderTurns(state, turns) : turns;
+  
+  let bestScore = -Infinity;
+  
+  for (const turn of orderedTurns) {
+    const undoInfos = applyTurn(state, turn);
+    
+    // Recurse - opponent's turn
+    const score = -searchTurns(state, depth - 1, -beta, -alpha, -color);
+    
+    undoTurn(state, turn, undoInfos);
+    
+    if (score > bestScore) {
+      bestScore = score;
+    }
+    if (score > alpha) {
+      alpha = score;
+    }
+    if (alpha >= beta) {
+      break; // Alpha-beta cutoff
+    }
+  }
+  
+  // Determine TT flag based on what happened
+  let ttFlag;
+  if (bestScore <= origAlpha) {
+    ttFlag = TT_FLAG_ALPHA;  // Failed low - upper bound
+  } else if (bestScore >= beta) {
+    ttFlag = TT_FLAG_BETA;   // Failed high - lower bound
+  } else {
+    ttFlag = TT_FLAG_EXACT;  // True minimax value
+  }
+  
+  // Store in transposition table
+  ttStore(hash, depth, bestScore, ttFlag);
   
   return bestScore;
 }
 
-// Helper to encode a double-turn as a single value (for TT storage)
-function encodeDoubleTurn(move1, move2) {
-  // Just store move1 for now - TT will use it for move ordering
-  return move1;
-}
-
 /**
- * Find the best turn (1-2 moves) for the current position using iterative deepening
- * Returns array of moves representing the turn
- * @param {GameState} state - Current game state
- * @param {number} depth - Search depth in turns (default: 6)
- * @param {number} color - Color to search for (default: state.sideToMove)
- * @param {number} maxMoves - Maximum moves in this turn (1 for balanced first turn, 2 normally)
+ * Find the best turn for the current position.
+ * Uses iterative deepening for better move ordering.
  */
-export function findBestTurn(state, depth = 4, color = undefined, maxMoves = 2) {
+export function findBestTurn(state, depth = 2, color = undefined, maxMoves = 2) {
   nodesSearched = 0;
-  ttHits = 0;
   const startTime = Date.now();
   
   if (color === undefined) {
     color = state.sideToMove;
   }
-  rootColor = color;
   
-  // Clear killers and age history at start of new search
-  clearKillers();
-  
-  const legalMoves = generateLegalMoves(state, color);
-  if (legalMoves.length === 0) {
+  const turns = generateAllTurns(state, color, maxMoves);
+  if (turns.length === 0) {
     return null;
   }
   
-  let bestTurn = null;
+  // Order turns for better alpha-beta pruning
+  const orderedTurns = turns.length > 8 ? orderTurns(state, turns) : turns;
+  
+  let bestTurn = orderedTurns[0];
   let bestScore = -Infinity;
-  let bestQuick = -Infinity;
+  let alpha = -Infinity;
+  const beta = Infinity;
   
-  // DEBUG_OPT: Reset counters
-  ttCutoffs = 0;
-  betaCutoffs = 0;
-  
-  // Iterative deepening: search depth 1, 2, 3... up to target
-  // This improves move ordering dramatically via TT
-  for (let currentDepth = 1; currentDepth <= depth; currentDepth++) {
-    const iterStartTime = Date.now();
-    const iterStartNodes = nodesSearched;
-    let iterBestTurn = null;
-    let iterBestScore = -Infinity;
-    let iterBestQuick = -Infinity;
+  for (const turn of orderedTurns) {
+    const undoInfos = applyTurn(state, turn);
     
-    // Root alpha-beta bounds
-    let rootAlpha = -Infinity;
-    const rootBeta = Infinity;
+    // Search opponent's response
+    const score = -searchTurns(state, depth - 1, -beta, -alpha, -color);
     
-    // Get TT best move for root ordering
-    const ttMove = tt.getBestMove(state.zobristHash) || 0;
-    const firstMoves = orderMoves(state, legalMoves, 0, ttMove);
+    undoTurn(state, turn, undoInfos);
     
-    // DEBUG_OPT: Log iteration start
-    if (DEBUG_OPT && currentDepth >= 1) {
-      console.log(`[DEBUG_OPT] Starting depth ${currentDepth}, ${firstMoves.length} first moves, ttMove=${ttMove}`);
+    if (score > bestScore) {
+      bestScore = score;
+      bestTurn = turn;
     }
-    
-    if (maxMoves === 1) {
-      // Single-move turn mode - use alpha-beta
-      let moveIdx = 0;
-      for (const move1 of firstMoves) {
-        moveIdx++;
-        const undoInfo1 = makeMove(state, move1);
-        const turnScore = -searchDoubleTurn(state, currentDepth - 1, -rootBeta, -rootAlpha, -color, 1);
-        undoMove(state, move1, undoInfo1);
-        
-        const currentTurn = [move1];
-        const quietScore = getQuietScore(state, currentTurn);
-        
-        if (turnScore > iterBestScore || (turnScore === iterBestScore && quietScore > iterBestQuick)) {
-          iterBestScore = turnScore;
-          iterBestTurn = currentTurn;
-          iterBestQuick = quietScore;
-        }
-        
-        // Update root alpha
-        if (turnScore > rootAlpha) {
-          rootAlpha = turnScore;
-        }
-      }
-    } else {
-      // Normal double-move turn with proper alpha-beta
-      let moveIdx = 0;
-      for (const move1 of firstMoves) {
-        moveIdx++;
-        const undoInfo1 = makeMove(state, move1);
-        const gaveCheck = isInCheck(state, -color);
-        
-        let turnScore;
-        let currentTurn;
-        
-        if (gaveCheck) {
-          // Turn ends with check - search opponent's response
-          turnScore = -searchDoubleTurn(state, currentDepth - 1, -rootBeta, -rootAlpha, -color, 1);
-          currentTurn = [move1];
-        } else {
-          // Search second moves with alpha-beta
-          const secondMoves = orderMoves(state, generateLegalMoves(state, color), 0, 0);
-          
-          if (secondMoves.length === 0) {
-            turnScore = evalForColor(state, color);
-            currentTurn = [move1];
-          } else {
-            let bestSecondMove = null;
-            let bestSecondScore = -Infinity;
-            let secondAlpha = rootAlpha; // Use current root alpha for pruning
-            
-            for (const move2 of secondMoves) {
-              const undoInfo2 = makeMove(state, move2);
-              const score = -searchDoubleTurn(state, currentDepth - 1, -rootBeta, -secondAlpha, -color, 1);
-              undoMove(state, move2, undoInfo2);
-              
-              if (score > bestSecondScore) {
-                bestSecondScore = score;
-                bestSecondMove = move2;
-              }
-              
-              // Update alpha for pruning within second-move selection
-              if (score > secondAlpha) {
-                secondAlpha = score;
-              }
-              
-              // Beta cutoff (shouldn't happen at root with beta=Infinity, but good practice)
-              if (score >= rootBeta) {
-                break;
-              }
-            }
-            
-            turnScore = bestSecondScore;
-            currentTurn = [move1, bestSecondMove];
-          }
-        }
-        
-        undoMove(state, move1, undoInfo1);
-        
-        const quietScore = getQuietScore(state, currentTurn);
-        
-        if (turnScore > iterBestScore || (turnScore === iterBestScore && quietScore > iterBestQuick)) {
-          iterBestScore = turnScore;
-          iterBestTurn = currentTurn;
-          iterBestQuick = quietScore;
-          
-          // DEBUG_OPT: Log when we find a new best
-          if (DEBUG_OPT && currentDepth >= 2) {
-            const turnStr = turnToString(state, currentTurn);
-            console.log(`[DEBUG_OPT] depth=${currentDepth} move ${moveIdx}/${firstMoves.length}: new best ${turnStr} score=${turnScore}`);
-          }
-        }
-        
-        // Update root alpha for next first-move search
-        if (turnScore > rootAlpha) {
-          rootAlpha = turnScore;
-        }
-      }
-    }
-    
-    // Update best result from this iteration
-    if (iterBestTurn) {
-      bestTurn = iterBestTurn;
-      bestScore = iterBestScore;
-      bestQuick = iterBestQuick;
-    }
-    
-    const iterElapsed = Date.now() - iterStartTime;
-    const iterNodes = nodesSearched - iterStartNodes;
-    
-    // DEBUG_OPT: Show progress for all depths
-    if (DEBUG_OPT) {
-      const turnStr = bestTurn ? turnToString(state, bestTurn) : 'null';
-      console.log(`[DEBUG_OPT] depth=${currentDepth} best=${turnStr} score=${bestScore} nodes=${iterNodes} ttCutoffs=${ttCutoffs} betaCutoffs=${betaCutoffs} time=${iterElapsed}ms`);
-    }
-    
-    // Early exit if we found a forced mate
-    if (Math.abs(bestScore) > CHECKMATE_SCORE - 100) {
-      console.log('[Engine] Mate found, stopping search');
-      break;
+    if (score > alpha) {
+      alpha = score;
     }
   }
   
   const elapsed = Date.now() - startTime;
-  
-  // Final result logging (can be used by caller)
-  if (bestTurn && DEBUG_OPT) {
-    const turnStr = turnToString(state, bestTurn);
-    console.log(`[Engine] Final: ${turnStr} score=${bestScore} nodes=${nodesSearched} ttHits=${ttHits} ttCutoffs=${ttCutoffs} betaCutoffs=${betaCutoffs} time=${elapsed}ms`);
-    
-    // DEBUG_OPT: TT efficiency stats
-    const ttEfficiency = nodesSearched > 0 ? ((ttCutoffs / nodesSearched) * 100).toFixed(1) : 0;
-    const betaEfficiency = nodesSearched > 0 ? ((betaCutoffs / nodesSearched) * 100).toFixed(1) : 0;
-    console.log(`[DEBUG_OPT] TT efficiency: ${ttEfficiency}%, Beta cutoff rate: ${betaEfficiency}%, TT size: ${tt.entries.size}`);
-  }
+  log(`[Engine] Search: depth=${depth} nodes=${nodesSearched} time=${elapsed}ms score=${bestScore}`);
   
   return bestTurn;
 }
@@ -2078,8 +2479,6 @@ export function turnToString(state, turn) {
  * Clear all search tables (call when starting a new game)
  */
 export function clearSearchTables() {
-  tt.clear();
-  clearKillers();
-  clearHistory();
-  if (DEBUG_OPT) console.log('[Engine] Search tables cleared');
+  ttable.clear();
+  nodesSearched = 0;
 }

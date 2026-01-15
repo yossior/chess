@@ -1,5 +1,5 @@
 const gameService = require('../services/game.service');
-const statsService = require('../services/stats.service');
+const BotGame = require('../models/botGame.model');
 
 // Track disconnect timeouts for players (gameId -> { color, timeout })
 const disconnectTimeouts = new Map();
@@ -105,17 +105,17 @@ function registerSocketHandlers(io, socket) {
     }
   });
 
-  // Bot game tracking (for disconnect/abandonment handling)
-  socket.on("botGameStarted", ({ gameId, skillLevel, playerColor, isUnbalanced }) => {
-    handleBotGameStarted(socket, gameId, skillLevel, playerColor, isUnbalanced);
+  // Bot game tracking (save to DB only on completion/abandonment)
+  socket.on("botGameStarted", ({ gameId, playerColor, isUnbalanced }) => {
+    handleBotGameStarted(socket, gameId, playerColor, isUnbalanced);
   });
 
   socket.on("botGameMove", ({ gameId, moves, fen }) => {
     handleBotGameMove(socket, gameId, moves, fen);
   });
 
-  socket.on("botGameEnded", ({ gameId }) => {
-    handleBotGameEnded(socket, gameId);
+  socket.on("botGameEnded", ({ gameId, result, winner }) => {
+    handleBotGameEnded(socket, gameId, result, winner);
   });
 
   // Disconnection
@@ -157,24 +157,6 @@ function handleFindGame(io, socket, userId = null) {
     // Joined existing game, notify both players
     const white = game.players.find((p) => p.color === "w");
     const black = game.players.find((p) => p.color === "b");
-    
-    // Log PvP game started with both players' info
-    // In findGame, the first player (waiting) is white, second player is black
-    const gameCreatorColor = 'w'; // First player (white) created the game
-    statsService.logPvpGameStarted(
-      game.id,
-      {
-        ip: white?.ip || null,
-        userAgent: white?.userAgent || null,
-        userId: white?.userId || null
-      },
-      {
-        ip: black?.ip || null,
-        userAgent: black?.userAgent || null,
-        userId: black?.userId || null
-      },
-      gameCreatorColor
-    );
     
     // Notify both players individually with their color
     if (white?.socketId) {
@@ -390,24 +372,6 @@ async function handleJoinGame(io, socket, gameId, userId = null, timeMinutes = n
   // Two players - start the game
   const white = game.players.find((p) => p.color === "w");
   const black = game.players.find((p) => p.color === "b");
-
-  // Log PvP game started with both players' info
-  // Determine who created the game (the one who was already in the game)
-  const gameCreatorColor = currentPlayer.color === 'w' ? 'b' : 'w'; // The other player created the game
-  statsService.logPvpGameStarted(
-    gameId,
-    {
-      ip: white?.ip || null,
-      userAgent: white?.userAgent || null,
-      userId: white?.userId || null
-    },
-    {
-      ip: black?.ip || null,
-      userAgent: black?.userAgent || null,
-      userId: black?.userId || null
-    },
-    gameCreatorColor
-  );
 
   // Notify both players individually with their color
   if (white?.socketId) {
@@ -734,28 +698,27 @@ function handleDeclineDraw(io, socket, gameId) {
 }
 
 /**
- * Handle bot game started - store in memory for disconnect tracking
+ * Handle bot game started - store in memory only (save to DB on completion)
  */
-function handleBotGameStarted(socket, gameId, skillLevel, playerColor, isUnbalanced) {
+function handleBotGameStarted(socket, gameId, playerColor, isUnbalanced) {
   if (!gameId) return;
   
   // Store bot game in the socket's data for tracking
   socket.data.botGame = {
     gameId,
-    skillLevel,
     playerColor,
     isUnbalanced,
     moves: [],
     fen: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
-    startedAt: new Date().toISOString(),
+    startedAt: new Date(),
     isCompleted: false
   };
   
-  console.log(`[BotGame] Started: ${gameId} (socket: ${socket.id}, skill: ${skillLevel}, color: ${playerColor})`);
+  console.log(`[BotGame] Started: ${gameId} (socket: ${socket.id}, color: ${playerColor})`);
 }
 
 /**
- * Handle bot game move - update stored state
+ * Handle bot game move - update stored state in memory only
  */
 function handleBotGameMove(socket, gameId, moves, fen) {
   if (!socket.data.botGame || socket.data.botGame.gameId !== gameId) return;
@@ -766,52 +729,75 @@ function handleBotGameMove(socket, gameId, moves, fen) {
 
 /**
  * Handle bot game ended normally (checkmate, draw, resignation, timeout)
- * This clears the bot game from tracking so it won't be saved as abandoned
+ * Saves game to DB on completion
  */
-function handleBotGameEnded(socket, gameId) {
-  if (!socket.data.botGame || socket.data.botGame.gameId !== gameId) return;
+async function handleBotGameEnded(socket, gameId, result = null, winner = null) {
+  const botGame = socket.data.botGame;
+  if (!botGame || botGame.gameId !== gameId) return;
   
-  socket.data.botGame.isCompleted = true;
-  console.log(`[BotGame] Ended normally: ${gameId}`);
+  botGame.isCompleted = true;
+  
+  // Save to database
+  try {
+    await BotGame.create({
+      gameId: botGame.gameId,
+      humanColor: botGame.playerColor,
+      humanIp: socket.data.ip,
+      isUnbalanced: botGame.isUnbalanced,
+      moves: botGame.moves,
+      fen: botGame.fen,
+      status: 'completed',
+      result: result || 'unknown',
+      winner,
+      startedAt: botGame.startedAt,
+      completedAt: new Date()
+    });
+    console.log(`[BotGame] Completed and saved: ${gameId} (result: ${result}, winner: ${winner}, moves: ${botGame.moves.length})`);
+  } catch (error) {
+    console.error(`[BotGame] Failed to save completed game: ${error.message}`);
+  }
 }
 
 /**
  * Handle bot game abandonment (called from disconnect timeout)
+ * Saves game to DB as abandoned
  */
 async function handleBotGameAbort(socket) {
   const botGame = socket.data.botGame;
   if (!botGame) return;
   if (botGame.isCompleted) return;
+  
+  // Determine winner: the player who abandoned loses, so the bot wins
+  const winner = botGame.playerColor === 'w' ? 'black' : 'white';
+  
+  // Only save if moves were made
   if (!botGame.moves || botGame.moves.length === 0) {
     console.log(`[BotGame] Not saving abandoned game ${botGame.gameId} - no moves made`);
+    socket.data.botGame = null;
     return;
   }
   
-  // Determine winner: the player who abandoned loses, so the bot wins
-  // playerColor is the human's color, so the opposite color wins
-  const winner = botGame.playerColor === 'w' ? 'black' : 'white';
-  
   console.log(`[BotGame] Saving abandoned game: ${botGame.gameId} (${botGame.moves.length} moves, winner: ${winner})`);
   
-  // Save to database via stats service
-  await statsService.logGameCompleted(
-    botGame.gameId,
-    'abandonment',
-    winner, // Bot wins when player abandons
-    true, // isBotGame
-    null, // sessionId
-    null, // userId
-    socket.data.userAgent,
-    socket.data.ip,
-    {
+  // Save to database
+  try {
+    await BotGame.create({
+      gameId: botGame.gameId,
+      humanColor: botGame.playerColor,
+      humanIp: socket.data.ip,
+      isUnbalanced: botGame.isUnbalanced,
       moves: botGame.moves,
       fen: botGame.fen,
-      skillLevel: botGame.skillLevel,
-      playerColor: botGame.playerColor,
-      isUnbalanced: botGame.isUnbalanced,
-      startedAt: botGame.startedAt
-    }
-  );
+      status: 'abandoned',
+      result: 'abandonment',
+      winner,
+      startedAt: botGame.startedAt,
+      completedAt: new Date()
+    });
+    console.log(`[BotGame] Abandoned game saved: ${botGame.gameId}`);
+  } catch (error) {
+    console.error(`[BotGame] Failed to save abandoned game: ${error.message}`);
+  }
   
   // Clear the bot game data
   socket.data.botGame = null;

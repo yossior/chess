@@ -1,30 +1,34 @@
 const mongoose = require('mongoose');
 
+/**
+ * Game Schema
+ * For human-vs-human (PvP) games only
+ * Bot games are stored in the BotGame collection
+ */
 const gameSchema = new mongoose.Schema({
-  gameId: { type: String, unique: true, sparse: true, index: true }, // Custom game ID for temp games
+  gameId: { type: String, unique: true, sparse: true, index: true },
+  
+  // White player
   white: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: false, default: null },
-  whiteSessionId: { type: String, required: false, default: null }, // Session ID if white is guest
+  whiteSessionId: { type: String, required: false, default: null },
   whiteIp: { type: String, required: false, default: null },
   whiteUserAgent: { type: String, required: false, default: null },
+  
+  // Black player  
   black: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: false, default: null },
-  blackSessionId: { type: String, required: false, default: null }, // Session ID if black is guest
+  blackSessionId: { type: String, required: false, default: null },
   blackIp: { type: String, required: false, default: null },
   blackUserAgent: { type: String, required: false, default: null },
   
   // Game state
   fen: { type: String, default: 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1' },
-  moves: [{ type: String }], // Array of moves in algebraic notation
+  moves: [{ type: String }],
   isUnbalanced: { type: Boolean, default: true },
-  
-  // Bot game specific fields
-  isBotGame: { type: Boolean, default: false, index: true },
-  skillLevel: { type: Number, default: null }, // Bot skill level (1-20 for Stockfish)
-  playerColor: { type: String, enum: ['w', 'b', null], default: null }, // Human player's color in bot games
   
   // Clock times in milliseconds
   whiteMs: { type: Number, default: 300000 },
   blackMs: { type: Number, default: 300000 },
-  increment: { type: Number, default: 2000 }, // Increment per move in ms
+  increment: { type: Number, default: 2000 },
   
   // Game status
   status: {

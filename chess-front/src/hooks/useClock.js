@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { log } from "../utils/debug";
 
 export default function useClock(initialTime = 300) {
 
@@ -90,7 +91,7 @@ export default function useClock(initialTime = 300) {
 
     const start = useCallback((side = "w") => {
         if (side !== "w" && side !== "b" && side !== null) return;
-        console.log('[Clock] start() called with side:', side);
+        log('[Clock] start() called with side:', side);
         clockStateRef.current.lastUpdateTime = Date.now();
         setIsActive(true);
         setActivePlayer(side);
@@ -117,7 +118,7 @@ export default function useClock(initialTime = 300) {
             clockStateRef.current.blackMs += incMs;
             setBlackMs(clockStateRef.current.blackMs);
         }
-        console.log(`[Clock] Applied increment to ${player}: +${incrementSeconds}s`);
+        log(`[Clock] Applied increment to ${player}: +${incrementSeconds}s`);
     }, []);
 
     const reset = useCallback((opts = {}) => {
@@ -145,7 +146,7 @@ export default function useClock(initialTime = 300) {
     const syncFromServer = useCallback((serverWhiteMs, serverBlackMs, activePlayerColor, opts = {}) => {
         const { startClock = false, serverTime = Date.now() } = opts;
 
-        console.log('[Clock] syncFromServer called:', {
+        log('[Clock] syncFromServer called:', {
             serverWhiteMs,
             serverBlackMs,
             activePlayerColor,
@@ -162,12 +163,12 @@ export default function useClock(initialTime = 300) {
 
         if (startClock && activePlayerColor) {
             const player = activePlayerColor === "w" ? "w" : "b";
-            console.log('[Clock] Starting clock for player:', player);
+            log('[Clock] Starting clock for player:', player);
             clockStateRef.current.activePlayer = player;
             setActivePlayer(player);
             setIsActive(true);
         } else {
-            console.log('[Clock] NOT starting clock (startClock=' + startClock + ')');
+            log('[Clock] NOT starting clock (startClock=' + startClock + ')');
         }
     }, []);
 

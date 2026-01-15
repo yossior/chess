@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from "react";
 import { Chess } from "chess.js";
 import { createDrawTracker } from "../utils/drawDetection";
+import { log } from "../utils/debug";
 
 /**
  * Minimal chess controller that exposes a single object (chess).
@@ -121,7 +122,7 @@ export function useChessController(clock, { enableClock = true, isUnbalanced = t
         setClockStarted(true);
         // Start or switch clock on every move for local/bot games
         if (clock && clock.start) {
-          console.log('[ChessController] Local clock transition to:', newTurn);
+          log('[ChessController] Local clock transition to:', newTurn);
           clock.start(newTurn);
         }
       }
@@ -156,13 +157,13 @@ export function useChessController(clock, { enableClock = true, isUnbalanced = t
     setDrawStatus({ isRepetition: false, isFiftyMove: false, repetitionCount: 1, halfMoveClock: 0 });
     if (!keepClock && clock?.reset) clock.reset();
 
-    console.log("Game reset");
+    log("Game reset");
   }, [chessGame, clock]);
 
   const resign = useCallback((color) => {
     setResigned(color);
     if (clock?.pause) clock.pause();
-    console.log(`${color === "w" ? "White" : "Black"} resigned`);
+    log(`${color === "w" ? "White" : "Black"} resigned`);
   }, [clock]);
 
   // Wrap return object in useMemo to prevent infinite dependency loops

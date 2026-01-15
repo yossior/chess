@@ -8,7 +8,6 @@
 import {
   GameState,
   findBestTurn,
-  decodeMove,
   getMoveFrom,
   getMoveTo,
   getMovePromotion,
@@ -18,17 +17,35 @@ import {
   turnToString,
   WHITE,
   BLACK,
+  setEngineDebug,
 } from './double-move-engine.js';
 
-console.log('[marseillais-engine-v2.worker] v2.7 balanced mode support');
+// ============================================================================
+// DEBUG LOGGING
+// Enable in production via console: postMessage({type:'debug',enabled:true})
+// ============================================================================
+let DEBUG = typeof process !== 'undefined' && process.env?.NODE_ENV === 'development' || 
+            (typeof location !== 'undefined' && location.hostname === 'localhost');
+
+function log(...args) {
+  if (DEBUG) console.log(...args);
+}
+
+log('[marseillais-engine-v2.worker] Worker initialized');
 
 // ============================================================================
 // SKILL LEVEL -> DEPTH MAPPING
 // ============================================================================
 
 function getSearchDepth(skillLevel) {
-  // Depth 2 = 2 turns = 4 single moves lookahead
-  return 2;
+  // Depth = number of TURNS to look ahead
+  // Hanging piece detection handles tactical threats at leaf nodes
+  switch (skillLevel) {
+    case 1: return 2;  // Easy
+    case 2: return 2;  // Medium - relies on tactical eval
+    case 3: return 3;  // Hard
+    default: return 2;
+  }
 }
 
 // ============================================================================
@@ -40,7 +57,7 @@ function findBestMoveFromFen(fen, skillLevel, maxMoves = 2) {
   state.loadFen(fen);
   
   const depth = getSearchDepth(skillLevel);
-  console.log(`[Engine] Searching at depth ${depth} (skill ${skillLevel}), maxMoves ${maxMoves}`);
+  log(`[Engine] Searching at depth ${depth} (skill ${skillLevel}), maxMoves ${maxMoves}`);
   
   const turn = findBestTurn(state, depth, undefined, maxMoves);
   
@@ -76,7 +93,7 @@ function findBestMoveFromFen(fen, skillLevel, maxMoves = 2) {
     makeMove(state, move);
   }
   
-  console.log(`[Engine] Best turn: ${result.map(m => m.san).join(' ')}`);
+  log(`[Engine] Best turn: ${result.map(m => m.san).join(' ')}`);
   
   return result;
 }
@@ -88,6 +105,14 @@ function findBestMoveFromFen(fen, skillLevel, maxMoves = 2) {
 self.onmessage = function(e) {
   const { type, fen, skillLevel, requestId, maxMoves = 2 } = e.data;
   
+  // Toggle debug mode from console: worker.postMessage({type:'debug',enabled:true})
+  if (type === 'debug') {
+    DEBUG = e.data.enabled;
+    setEngineDebug(DEBUG); // Also toggle in engine
+    console.log(`[Engine] Debug mode: ${DEBUG ? 'ON' : 'OFF'}`);
+    return;
+  }
+  
   if (type === 'init') {
     self.postMessage({ type: 'ready' });
     return;
@@ -95,7 +120,7 @@ self.onmessage = function(e) {
   
   if (type === 'findBestMove') {
     try {
-      console.log(`[Engine] Skill ${skillLevel}, maxMoves ${maxMoves}`);
+      log(`[Engine] Skill ${skillLevel}, maxMoves ${maxMoves}`);
       
       const bestTurn = findBestMoveFromFen(fen, skillLevel, maxMoves);
       
